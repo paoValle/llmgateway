@@ -1,0 +1,29 @@
+# Ignora solo ciò che è rumore per questo progetto.
+# I template comuni vivono in harness/template/shared/.gitignore e vengono uniti a questo.
+
+# --- segreti: la regola è "non ci devono essere", ma il pattern resta ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+service-account*.json
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*~
+
+# --- artefatti ---
+/tmp/
+/logs/
+*.log
+coverage/
+node_modules/
+vendor/

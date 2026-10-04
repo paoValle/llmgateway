@@ -1,0 +1,22 @@
+[package]
+name = "llmgateway"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "TODO: una riga sul perche esiste."
+license = "MIT"
+
+[dependencies]
+# niente dipendenze finche il progetto non le richiede davvero
+
+[dev-dependencies]
+# idem per i test
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"

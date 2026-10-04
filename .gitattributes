@@ -1,0 +1,17 @@
+# normalizza in checkout, LF nel repo, niente fili di piattaforma
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.pdf binary
+*.zip binary
+*.gz binary
+
+# lockfile mai da normalizzare
+*.lock -text
+package-lock.json -text
+composer.lock -text
+Cargo.lock -text
+go.sum -text
+uv.lock -text
