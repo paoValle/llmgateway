@@ -1,0 +1,54 @@
+# Configurazione di esempio. Copiala e adattala.
+#
+# Nota su cosa c'è e cosa non c'è: **nessun segreto in questo file.** Le chiavi si
+# prendono dall'ambiente, e qui sotto c'è solo il nome della variabile da cui
+# leggerle. Questo file è quindi committabile, e un diff su di esso non può
+# far trapelare una chiave.
+
+[server]
+bind = "127.0.0.1:8080"
+request_timeout_ms = 60_000
+# Tetto di tentativi su tutti i provider insieme. Il failover senza tetto è un
+# attacco che si autoalimenta.
+max_attempts = 4
+# 1 = metriche esatte. Sopra 1 si contano 1 richiesta ogni N.
+metrics_sample_rate = 100
+
+# --- provider, in ordine di preferenza ---
+# La priorità deve essere univoca: due provider con la stessa priorità rendono
+# il failover non deterministico, e la configurazione viene rifiutata.
+
+[[providers]]
+name = "primario"
+base_url = "https://api.openai.com/v1"
+api_key_env = "PRIMARIO_API_KEY"
+priority = 1
+
+[[providers]]
+name = "secondario"
+base_url = "https://api-fallback.example.com/v1"
+api_key_env = "SECONDARIO_API_KEY"
+priority = 2
+
+# --- prezzi: dollari per milione di token ---
+# Un modello non elencato viene valutato al prezzo più alto che si conosce, mai a
+# zero: prezzo zero significa "il tetto protegge" mentre non protegge niente.
+
+[pricing]
+"gpt-4o-mini" = { input = 0.15, output = 0.60 }
+"gpt-4o"      = { input = 2.50, output = 10.00 }
+
+# --- tenant ---
+# `models` è facoltativo. Se lo metti, il tenant non può usarne altri: è un
+# vincolo che vale quanto il tetto, e va pensato.
+
+[[tenants]]
+id = "acme"
+key_env = "TENANT_ACME_KEY"
+monthly_budget_usd = 50.0
+models = ["gpt-4o-mini", "gpt-4o"]
+
+[[tenants]]
+id = "beta"
+key_env = "TENANT_BETA_KEY"
+monthly_budget_usd = 5.0
