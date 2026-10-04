@@ -53,6 +53,16 @@ pub enum RouteError {
         /// Il corpo della risposta, per inoltrarlo.
         body: Vec<u8>,
     },
+    /// Tutti i provider hanno risposto "non posso", o l'ultimo tentativo è finito
+    /// così. **Non** è un errore del client e non è lo status di un provider
+    /// singolo: è il fatto che il gateway, nel suo complesso, non ha potuto
+    /// servire. Va detto come `502`, non inoltrando lo status del provider.
+    ProviderUnavailable {
+        /// L'ultimo provider che ha risposto.
+        provider: String,
+        /// Lo status che ha dato.
+        status: u16,
+    },
     /// Un provider ha risposto con uno status che il gateway non sa classificare.
     UnknownStatus {
         /// Chi ha risposto.
@@ -90,6 +100,10 @@ impl std::fmt::Display for RouteError {
             Self::ClientFault { provider, status, .. } => {
                 write!(f, "{provider} ha respinto la richiesta ({status}): errore del cliente, non si ritenta")
             }
+            Self::ProviderUnavailable { provider, status, .. } => write!(
+                f,
+                "nessun provider ha potuto servire la richiesta (ultimo: {provider}, {status})"
+            ),
             Self::UnknownStatus { provider, status, .. } => write!(
                 f,
                 "{provider} ha risposto {status}, uno stato che il gateway non sa classificare: non si ritenta"
@@ -337,9 +351,11 @@ fn classify_response(provider: &str, status: u16, body: Vec<u8>) -> RouteError {
             status,
             body,
         },
-        // `Retryable` non arriva qui: il chiamante lo ha già gestito come tentativo.
-        // Trasformarlo in "ignoto" racconterebbe una decisione come se fosse un errore.
-        FailureClass::Unknown | FailureClass::Retryable => RouteError::UnknownStatus {
+        FailureClass::Retryable => RouteError::ProviderUnavailable {
+            provider: provider.to_owned(),
+            status,
+        },
+        FailureClass::Unknown => RouteError::UnknownStatus {
             provider: provider.to_owned(),
             status,
             body,

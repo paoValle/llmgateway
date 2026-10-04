@@ -36,6 +36,11 @@ struct TenantTotals {
     budget_denied: AtomicU64,
     /// Richieste che non sono arrivate da nessun provider.
     failed: AtomicU64,
+    /// Richieste servite **senza il tetto**, perché il suo stato non era leggibile.
+    ///
+    /// È l'allarme più importante del gateway: da quel momento il tetto non protegge
+    /// più nessuno, e finché il numero è a zero il servizio è sotto controllo.
+    senza_tetto: AtomicU64,
 }
 
 /// Come è finita una richiesta, dal punto di vista del conto.
@@ -75,6 +80,8 @@ pub struct Meter {
     seen: AtomicU64,
     /// Conti calcolati su un modello fuori listino: vanno verificati a mano.
     estimated: AtomicU64,
+    /// Servite senza tetto, su tutti i tenant.
+    senza_tetto_totali: AtomicU64,
 }
 
 impl Meter {
@@ -89,6 +96,7 @@ impl Meter {
             errors: AtomicU64::new(0),
             seen: AtomicU64::new(0),
             estimated: AtomicU64::new(0),
+            senza_tetto_totali: AtomicU64::new(0),
         }
     }
 
@@ -144,6 +152,27 @@ impl Meter {
         }
     }
 
+    /// Registra una richiesta servita **senza che il tetto fosse stato controllato**.
+    ///
+    /// Succede solo quando lo stato del tetto non è leggibile. Non è un errore da
+    /// nascondere: è il momento in cui il tetto smette di proteggere, e il numero va
+    /// in pagina per l'allarme.
+    pub fn registr_senza_tetto(&self, tenant: &str) {
+        self.senza_tetto_totali.fetch_add(1, Ordering::Relaxed);
+        self.totali_del(tenant)
+            .senza_tetto
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Quante richieste in totale sono state servite senza il tetto.
+    ///
+    /// Su zero, il tetto protegge. Su un numero, no: e finché non torna a zero il
+    /// gateway sta spendendo senza controllo.
+    #[must_use]
+    pub fn servite_senza_tetto(&self) -> u64 {
+        self.senza_tetto_totali.load(Ordering::Relaxed)
+    }
+
     /// Registra un rifiuto per tetto. Il provider non è stato chiamato: il denaro
     /// speso è zero, ma la richiesta è comunque un'informazione che serve.
     pub fn registr_tetto_negato(&self, tenant: &str) {
@@ -163,6 +192,26 @@ impl Meter {
         self.totali_del(tenant).spent.load(Ordering::Relaxed)
     }
 
+    /// La fotografia di un tenant, se esiste.
+    ///
+    /// `None` significa che quel tenant non ha ancora fatto nessuna richiesta: non
+    /// che abbia speso zero. La differenza serve in `/metrics`, dove una riga
+    /// assente e uno zero raccontano storie diverse.
+    #[must_use]
+    pub fn snapshot_di(&self, tenant: &str) -> Option<TenantSnapshot> {
+        let t = self.totals.read().ok()?.get(tenant)?.clone();
+        Some(snapshot_of(&t))
+    }
+
+    /// Quante richieste di un tenant sono state negate dal tetto.
+    ///
+    /// Campionato come le altre metriche operative: è un numero di diagnostica, non
+    /// un conto.
+    #[must_use]
+    pub fn spesi_negati(&self, tenant: &str) -> u64 {
+        self.snapshot_di(tenant).map_or(0, |s| s.budget_denied)
+    }
+
     /// Le fotografie di tutti i tenant incontrati, per `/metrics`.
     #[must_use]
     pub fn snapshots(&self) -> Vec<TenantSnapshot> {
@@ -170,15 +219,7 @@ impl Meter {
             Ok(t) => t.values().cloned().collect(),
             Err(_) => return Vec::new(),
         };
-        tutti
-            .iter()
-            .map(|t| TenantSnapshot {
-                spent: t.spent.load(Ordering::Relaxed),
-                served: t.served.load(Ordering::Relaxed),
-                budget_denied: t.budget_denied.load(Ordering::Relaxed),
-                failed: t.failed.load(Ordering::Relaxed),
-            })
-            .collect()
+        tutti.iter().map(|t| snapshot_of(t)).collect()
     }
 
     /// Quante volte il metering ha dovuto degradare. Su zero, tutto è andato.
@@ -240,6 +281,16 @@ impl Meter {
     }
 }
 
+fn snapshot_of(t: &TenantTotals) -> TenantSnapshot {
+    TenantSnapshot {
+        spent: t.spent.load(Ordering::Relaxed),
+        served: t.served.load(Ordering::Relaxed),
+        budget_denied: t.budget_denied.load(Ordering::Relaxed),
+        failed: t.failed.load(Ordering::Relaxed),
+        senza_tetto: t.senza_tetto.load(Ordering::Relaxed),
+    }
+}
+
 /// La fotografia di un tenant per `/metrics`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TenantSnapshot {
@@ -251,6 +302,8 @@ pub struct TenantSnapshot {
     pub budget_denied: u64,
     /// Fallite, campionate.
     pub failed: u64,
+    /// Servite senza il tetto. **Mai campionato**: è un allarme, non una statistica.
+    pub senza_tetto: u64,
 }
 
 #[cfg(test)]
@@ -432,6 +485,18 @@ mod tests {
     #[test]
     fn un_tasso_di_zero_significa_contare_tutto_non_niente() {
         assert_eq!(Meter::new(prezzi(), 0).sample_rate(), 1);
+    }
+
+    #[test]
+    fn una_richiesta_servita_senza_tetto_e_l_allarme_principale() {
+        let m = meter();
+        assert_eq!(m.servite_senza_tetto(), 0, "su zero il tetto protegge");
+
+        m.registr_senza_tetto("acme");
+        m.registr_senza_tetto("beta");
+
+        assert_eq!(m.servite_senza_tetto(), 2);
+        assert_eq!(m.snapshot_di("acme").map(|s| s.senza_tetto), Some(1));
     }
 
     #[test]
