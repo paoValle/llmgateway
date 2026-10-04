@@ -5,6 +5,7 @@
 //! Lo stato è in memoria e il progetto è pensato per **una sola istanza**: vedi
 //! [`docs/adr/0006-stato-in-memoria.md`](../docs/adr/0006-stato-in-memoria.md).
 
+pub mod budget;
 /// Quanto costa: micro-dollari interi, prezzi per modello.
 pub mod config;
 pub mod pricing;
