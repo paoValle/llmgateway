@@ -24,6 +24,9 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 futures-util = "0.3"
 
 [dev-dependencies]
+# `tokio` come dev-dependency con le feature di test: i test del router sono
+# asincroni, e senza macro non si può scrivere `#[tokio::test]`
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 
