@@ -257,6 +257,22 @@ impl TenantBudget {
         })
     }
 
+    /// Avvelena il lock, come farebbe un `panic` in un altro thread.
+    ///
+    /// Esiste per una sola ragione: verificare che un tetto il cui stato non è
+    /// leggibile **non impedisca comunque di servire la richiesta** (ADR 0004). Non
+    /// c'è un modo onesto di provocare un `panic` dentro gli altri metodi, e senza
+    /// questo-hook il test più importante del progetto non si può scrivere.
+    ///
+    /// Ritorna `true` se il lock è stato avvelenato.
+    #[doc(hidden)]
+    pub fn avvelena(&self) -> bool {
+        let Ok(_guard) = self.state.lock() else {
+            return false; // già avvelenato: niente da fare
+        };
+        std::panic::panic_any(Avvelenamento);
+    }
+
     /// Prende il lock e azzera i contatori se il mese è cambiato.
     fn lock(&self, now_ms: i64) -> Result<std::sync::MutexGuard<'_, State>, BudgetPoisoned> {
         let mut s = self.state.lock().map_err(|_| BudgetPoisoned)?;
@@ -293,6 +309,11 @@ impl std::fmt::Display for BudgetPoisoned {
 }
 
 impl std::error::Error for BudgetPoisoned {}
+
+/// Il tipo con cui si avvelena il lock. Non viene mai restituito a nessuno.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct Avvelenamento;
 
 /// Una fotografia del tetto di un tenant.
 #[derive(Debug, Clone, PartialEq, Eq)]

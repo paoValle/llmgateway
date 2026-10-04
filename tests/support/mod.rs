@@ -1,3 +1,8 @@
+// Questo modulo è compilato due volte, una per ogni binario di test che lo include.
+// Ogni copia vede solo gli strumenti che il proprio test usa, e segnalerebbe gli
+// altri come morti. È un toolbox condiviso: la metà inutilizzata è normale.
+#![allow(dead_code)]
+
 //! Un provider finto, per testare il router senza rete.
 //!
 //! È qui che il progetto guadagna da `Upstream` essere un trait: l'intera politica di

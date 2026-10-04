@@ -22,6 +22,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 futures-util = "0.3"
+sha2 = "0.10"
 
 [dev-dependencies]
 # `tokio` come dev-dependency con le feature di test: i test del router sono
