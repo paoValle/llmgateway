@@ -27,3 +27,5 @@ desktop.ini
 coverage/
 node_modules/
 vendor/
+# binari e artefatti
+/target/

@@ -7,13 +7,41 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  # il toolchain lo dichiara rust-toolchain.toml: qui non si duplica il canale
+  RUSTFLAGS: -D warnings
+
 jobs:
   ci:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # lo stesso codice su due sistemi: su Linux è dove gira in produzione,
+        # macOS è dove scappa un test che dipende dalla localizzazione
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-targets
+      - run: cargo test --doc
+
+  # il lockfile è ciò che rende la build riproducibile: se le dipendenze si
+  # risolvono diversamente da un commit all'altro, la CI verde non dice niente
+  lockfile:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with: { components: 'clippy, rustfmt' }
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: make ci
+      - run: cargo update --locked
