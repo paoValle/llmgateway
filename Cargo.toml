@@ -3,20 +3,46 @@ name = "llmgateway"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
-description = "TODO: una riga sul perche esiste."
+description = "Gateway LLM: metering per token, budget per tenant, failover tra provider, metriche Prometheus."
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/paoValle/llmgateway"
+keywords = ["llm", "gateway", "proxy", "metering", "budget"]
+categories = ["network-programming", "api-bindings"]
 
+# vedi docs/adr/0001-dipendenze.md: set minimo e dichiarato, niente altro.
 [dependencies]
-# niente dipendenze finche il progetto non le richiede davvero
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+axum = { version = "0.8", features = ["json", "tokio", "http1"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2", "charset"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+futures-util = "0.3"
 
 [dev-dependencies]
-# idem per i test
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+# questi non sono difetti in un gateway: sono rumore su un dominio in cui
+# `unwrap` è banale ma `expect` con messaggio è documentazione
+# (lasciati disattivati per scelta: vedi docs/adr/0001-dipendenze.md)
+unwrap_used = "allow"
+expect_used = "allow"
 module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+cast_possible_truncation = "allow"
