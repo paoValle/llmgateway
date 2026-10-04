@@ -1,9 +1,19 @@
 version: 2
 updates:
-  - package-ecosystem: npm
+  - package-ecosystem: cargo
     directory: /
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    # Idem: le minor si mergiano se la CI è verde, le major sono una decisione.
+    # In Rust è ancora più vero: un cambio di major spesso tocca gli `unsafe` e le
+    # feature, e un PR automatico che lo fa da solo è un PR che nessuno guarda.
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
+
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: monthly }
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
