@@ -29,6 +29,15 @@ pub fn usd(amount: f64) -> Option<MicroUsd> {
     Some((amount * 1_000_000.0).round() as MicroUsd)
 }
 
+/// Un importo già espresso in micro-dollari.
+///
+/// È il fratello Rust di [`usd`]: serve dove il valore è già noto e non viene da un
+/// listino scritto a mano, e dove passarlo da `f64` aggiungerebbe un errore solo.
+#[must_use]
+pub const fn micros(amount: u64) -> MicroUsd {
+    amount
+}
+
 /// Prezzi di un modello, in micro-dollari per **milione** di token.
 ///
 /// Unità comoda perché è quella con cui i provider pubblicano i listini: non
@@ -197,6 +206,13 @@ mod tests {
         assert_eq!(usd(1.0), Some(1_000_000));
         assert_eq!(usd(0.25), Some(250_000));
         assert_eq!(usd(0.0), Some(0));
+    }
+
+    #[test]
+    fn i_micro_dollari_sono_interi_e_non_passano_dai_float() {
+        // da qui in poi nel progetto non c'è più nessun f64 che tocchi un prezzo
+        assert_eq!(micros(150), 150);
+        assert_eq!(micros(1_000_000), usd(1.0).expect("1 USD"));
     }
 
     #[test]
