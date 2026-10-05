@@ -201,7 +201,7 @@ impl Meter {
     #[must_use]
     pub fn snapshot_for(&self, tenant: &str) -> Option<TenantSnapshot> {
         let t = self.totals.read().ok()?.get(tenant)?.clone();
-        Some(snapshot_of(&t))
+        Some(snapshot_of(&t, tenant))
     }
 
     /// How many requests of a tenant were denied by the cap.
@@ -215,11 +215,14 @@ impl Meter {
     /// The snapshots of all tenants encountered, for `/metrics`.
     #[must_use]
     pub fn snapshots(&self) -> Vec<TenantSnapshot> {
-        let all: Vec<Arc<TenantTotals>> = match self.totals.read() {
-            Ok(t) => t.values().cloned().collect(),
+        let all: Vec<(String, Arc<TenantTotals>)> = match self.totals.read() {
+            Ok(t) => t
+                .iter()
+                .map(|(id, totals)| (id.clone(), Arc::clone(totals)))
+                .collect(),
             Err(_) => return Vec::new(),
         };
-        all.iter().map(|t| snapshot_of(t)).collect()
+        all.iter().map(|(id, t)| snapshot_of(t, id)).collect()
     }
 
     /// How many times metering had to degrade. At zero, everything went fine.
@@ -281,8 +284,9 @@ impl Meter {
     }
 }
 
-fn snapshot_of(t: &TenantTotals) -> TenantSnapshot {
+fn snapshot_of(t: &TenantTotals, tenant_id: &str) -> TenantSnapshot {
     TenantSnapshot {
+        tenant_id: tenant_id.to_owned(),
         spent: t.spent.load(Ordering::Relaxed),
         served: t.served.load(Ordering::Relaxed),
         budget_denied: t.budget_denied.load(Ordering::Relaxed),
@@ -292,8 +296,11 @@ fn snapshot_of(t: &TenantTotals) -> TenantSnapshot {
 }
 
 /// A tenant snapshot for `/metrics`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Not `Copy`: it carries the tenant name now, and a name is not a number.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TenantSnapshot {
+    /// The tenant this snapshot belongs to: without it a metric cannot be labelled.
+    pub tenant_id: String,
     /// Money spent, **exact**.
     pub spent: MicroUsd,
     /// Requests served, sampled.
