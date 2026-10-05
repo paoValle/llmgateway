@@ -10,6 +10,10 @@ pub mod budget;
 /// What things cost: integer micro-dollars, prices per model.
 pub mod config;
 pub mod gateway;
+/// The HTTP surface: the client side of the gateway.
+pub mod http;
+/// The HTTP provider: an `Upstream` that actually calls one.
+pub mod http_upstream;
 pub mod meter;
 pub mod pricing;
 pub mod request;

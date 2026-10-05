@@ -154,6 +154,21 @@ impl Gateway {
         }
     }
 
+    /// The meter behind this gateway.
+    ///
+    /// Exposed so an HTTP surface can answer `/metrics` from the same counters the gateway
+    /// writes to: a second handle to the same counter is a second chance to diverge.
+    #[must_use]
+    pub fn meter(&self) -> &Arc<Meter> {
+        &self.config.meter
+    }
+
+    /// The per-tenant caps behind this gateway.
+    #[must_use]
+    pub fn budgets(&self) -> &BudgetRegistry {
+        &self.config.budget
+    }
+
     /// Handles a request.
     ///
     /// It never returns `Err`: every failure is a response, because from the client's
@@ -176,8 +191,9 @@ impl Gateway {
         // --- 2. reading the body and estimating ---
         let shape = inspect(&request.body, self.config.max_output_default);
         let Some(model) = shape.model.clone() else {
-            // no model: no price and no routing. Answering 400 here is a judgment on the
-            // body that the gateway does **not** make: it leaves it to the provider
+            // no model: no price, no routing, and nothing to forward *to*. This is the only
+            // judgment the gateway makes about the body, and it makes it because without a
+            // model there is no provider that could answer instead
             tracing::info!(tenant = %tenant.id, "request with no readable model");
             return Self::from_gateway(
                 400,
