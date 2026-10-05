@@ -1,10 +1,10 @@
-# Toolchain dichiarato: la build deve dare lo stesso risultato su ogni macchina.
+# Declared toolchain: the build must give the same result on every machine.
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
 
 [profile.dev]
-# Colpa degli assert: i test devono fallire anche in release.
+# The asserts' fault: tests must fail in release too.
 opt-level = 0
 debug = 1

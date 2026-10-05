@@ -1,86 +1,86 @@
-//! Il gateway: mettere in fila autenticazione, tetto, failover e conto.
+//! The gateway: lining up authentication, cap, failover and accounting.
 //!
-//! `Gateway::gestisci` è una **funzione pura** che va da una richiesta a una
-//! risposta. Non c'è un `Request` HTTP dentro e non c'è un `Response` HTTP fuori:
-//! l'adapter di trasporto sta in [`crate::http`] ed è di poche righe.
+//! `Gateway::handle` is a **pure function** that goes from a request to a response.
+//! There is no HTTP `Request` inside and no HTTP `Response` outside: the transport
+//! adapter lives in [`crate::http`] and is a few lines long.
 //!
-//! La ragione è la stessa di `agentloop`: un ciclo che chiama il mondo esterno è
-//! testabile solo se il mondo esterno è un'interfaccia. Qui il test con un provider
-//! finto e un `BudgetRegistry` costruito a mano verifica **tutto** il percorso —
-//! autenticazione, tetto, failover, conto — in microsecondi, senza un server.
+//! The reason is the same as in `agentloop`: a cycle that calls the outside world is
+//! testable only if the outside world is an interface. Here the test with a fake provider
+//! and a hand-built `BudgetRegistry` verifies **the whole** path — authentication, cap,
+//! failover, accounting — in microseconds, with no server.
 //!
-//! L'ordine delle operazioni non è casuale, e ognuno dei quattro passi è lì per un
-//! motivo:
+//! The order of the operations is not random, and each of the four steps is there for a
+//! reason:
 //!
-//! 1. **autenticare**: chi è, e può usare questo modello.
-//! 2. **leggere il body e stimare**: quanto costerebbe *prima* di chiamare chiunque.
-//! 3. **prenotare il tetto**: se non entra, si risponde `429` e **nessun provider
-//!    viene chiamato**. È la differenza fra un tetto e un rendiconto.
-//! 4. **inoltrare e saldare**: col conto reale, e la differenza viene liberata.
+//! 1. **authenticate**: who it is, and whether they may use this model.
+//! 2. **read the body and estimate**: what it would cost *before* calling anyone.
+//! 3. **reserve the cap**: if it does not fit, answer `429` and **no provider is
+//!    called**. It is the difference between a cap and a report.
+//! 4. **forward and settle**: with the real bill, and the difference is released.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::auth::{Autenticatore, ErroreAuth};
+use crate::auth::{AuthError, Authenticator};
 use crate::budget::{BudgetRegistry, ReserveError};
-use crate::meter::{Esito, Meter};
+use crate::meter::{Meter, Outcome};
 use crate::pricing::{MicroUsd, PriceTable, Usage};
 use crate::request::{inspect, RequestShape};
 use crate::router::{RouteError, Routed, Router};
 use crate::upstream::{ResponseBody, UpstreamRequest};
 
-/// Una richiesta che arriva al gateway. Non è un `Request` HTTP: è ciò che il
-/// gateway **usa**, e nulla di più.
+/// A request that arrives at the gateway. It is not an HTTP `Request`: it is what the
+/// gateway **uses**, and nothing more.
 #[derive(Debug, Clone)]
-pub struct Richiesta {
-    /// La chiave del tenant, se presente. `None` è una richiesta non autenticata.
-    pub chiave: Option<String>,
-    /// Il corpo della richiesta, byte per byte.
+pub struct GatewayRequest {
+    /// The tenant key, if present. `None` is an unauthenticated request.
+    pub key: Option<String>,
+    /// The request body, byte for byte.
     pub body: Vec<u8>,
 }
 
-/// Una risposta del gateway. Come la richiesta, non è un `Response` HTTP.
-pub enum Risposta {
-    /// Risposta in memoria, pronta da servire.
-    Intera {
-        /// Lo stato.
+/// A gateway response. Like the request, it is not an HTTP `Response`.
+pub enum GatewayResponse {
+    /// In-memory response, ready to be served.
+    Whole {
+        /// The status.
         status: u16,
-        /// Il corpo, **esattamente come è arrivato** dal provider.
+        /// The body, **exactly as it arrived** from the provider.
         body: Vec<u8>,
-        /// Chi ha risposto, se qualcuno ha risposto.
+        /// Who answered, if anyone answered.
         provider: Option<String>,
     },
-    /// Risposta in streaming: il gateway non l'ha accumulata e non deve.
-    Flusso {
-        /// Lo stato.
+    /// Streaming response: the gateway did not accumulate it and must not.
+    Stream {
+        /// The status.
         status: u16,
-        /// I chunk, nell'ordine in cui arrivano.
+        /// The chunks, in the order they arrive.
         chunks: crate::upstream::ByteStream,
-        /// Chi ha risposto.
+        /// Who answered.
         provider: String,
     },
 }
 
-/// `Debug` a mano per lo stesso motivo di [`crate::upstream::ResponseBody`]: il
-/// contenuto di uno streaming non è formattabile, e stamparlo in un log finirebbe
-/// con dentro la risposta del provider.
-impl std::fmt::Debug for Risposta {
+/// `Debug` by hand for the same reason as [`crate::upstream::ResponseBody`]: the content
+/// of a stream is not formattable, and printing it into a log would end up with the
+/// provider's response inside.
+impl std::fmt::Debug for GatewayResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Intera {
+            Self::Whole {
                 status,
                 body,
                 provider,
             } => f
-                .debug_struct("Intera")
+                .debug_struct("Whole")
                 .field("status", status)
                 .field("bytes", &body.len())
                 .field("provider", provider)
                 .finish(),
-            Self::Flusso {
+            Self::Stream {
                 status, provider, ..
             } => f
-                .debug_struct("Flusso")
+                .debug_struct("Stream")
                 .field("status", status)
                 .field("provider", provider)
                 .finish(),
@@ -88,46 +88,46 @@ impl std::fmt::Debug for Risposta {
     }
 }
 
-impl Risposta {
-    /// Lo stato, in entrambi i casi.
+impl GatewayResponse {
+    /// The status, in both cases.
     #[must_use]
     pub fn status(&self) -> u16 {
         match self {
-            Self::Intera { status, .. } | Self::Flusso { status, .. } => *status,
+            Self::Whole { status, .. } | Self::Stream { status, .. } => *status,
         }
     }
 
-    /// Chi ha risposto, se qualcuno ha risposto.
+    /// Who answered, if anyone answered.
     #[must_use]
     pub fn provider(&self) -> Option<&str> {
         match self {
-            Self::Intera { provider, .. } => provider.as_deref(),
-            Self::Flusso { provider, .. } => Some(provider),
+            Self::Whole { provider, .. } => provider.as_deref(),
+            Self::Stream { provider, .. } => Some(provider),
         }
     }
 }
 
-/// Come è costruito il gateway.
+/// How the gateway is built.
 pub struct GatewayConfig {
-    /// Chi può usare il gateway.
-    pub autenticatore: Autenticatore,
-    /// I tetti per tenant.
+    /// Who may use the gateway.
+    pub authenticator: Authenticator,
+    /// The per-tenant caps.
     pub budget: BudgetRegistry,
-    /// Il contatore.
+    /// The counter.
     pub meter: Arc<Meter>,
-    /// Il router.
+    /// The router.
     pub router: Arc<Router>,
-    /// I prezzi per modello, per stimare prima della chiamata.
-    pub prezzi: PriceTable,
-    /// Output massimo presumed quando il client non lo dichiara.
+    /// The prices per model, to estimate before the call.
+    pub prices: PriceTable,
+    /// Maximum output assumed when the client does not declare it.
     pub max_output_default: u64,
-    /// Il timeout di una chiamata upstream.
+    /// The timeout of one upstream call.
     pub timeout: Duration,
-    /// Una funzione che restituisce "adesso", in millisecondi Unix.
+    /// A function returning "now", in Unix milliseconds.
     ///
-    /// È un parametro e non un `SystemTime::now()` nascosto: i test devono poter
-    /// cambiare mese senza dormire trenta giorni.
-    pub adesso: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// It is a parameter and not a hidden `SystemTime::now()`: the tests must be able to
+    /// change month without sleeping thirty days.
+    pub now: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
 
 impl std::fmt::Debug for GatewayConfig {
@@ -139,14 +139,14 @@ impl std::fmt::Debug for GatewayConfig {
     }
 }
 
-/// Il gateway.
+/// The gateway.
 #[derive(Clone, Debug)]
 pub struct Gateway {
     config: Arc<GatewayConfig>,
 }
 
 impl Gateway {
-    /// Costruisce il gateway. La configurazione è economica da clonare, ma si condivide.
+    /// Builds the gateway. The configuration is cheap to clone, but it is shared.
     #[must_use]
     pub fn new(config: GatewayConfig) -> Self {
         Self {
@@ -154,208 +154,202 @@ impl Gateway {
         }
     }
 
-    /// Gestisce una richiesta.
+    /// Handles a request.
     ///
-    /// Non ritorna mai `Err`: ogni fallimento è una risposta, perché dal punto di
-    /// vista del client **tutto** è una risposta. Un `Err` qui significherebbe che
-    /// il gateway è caduto, e in quel caso l'unica risposta giusta è farlo notare.
-    pub async fn gestisci(&self, richiesta: Richiesta) -> Risposta {
-        let now = (self.config.adesso)();
+    /// It never returns `Err`: every failure is a response, because from the client's
+    /// point of view **everything** is a response. An `Err` here would mean the gateway
+    /// crashed, and in that case the only right response is to make it noticeable.
+    pub async fn handle(&self, request: GatewayRequest) -> GatewayResponse {
+        let now = (self.config.now)();
 
-        // --- 1. autenticazione ---
-        let tenant = match self
-            .config
-            .autenticatore
-            .identifica(richiesta.chiave.as_deref())
-        {
+        // --- 1. authentication ---
+        let tenant = match self.config.authenticator.identify(request.key.as_deref()) {
             Ok(t) => t,
             Err(e) => {
-                // una chiave non valida non è un errore da lograre come guasto: arriva
-                // a ogni richiesta se qualcuno ha sbagliato la configurazione
-                tracing::info!(errore = %e, "richiesta non autenticata");
-                return Self::rifiuta(e);
+                // an invalid key is not an error to log as a failure: it arrives on every
+                // request if someone got the configuration wrong
+                tracing::info!(error = %e, "unauthenticated request");
+                return Self::reject(e);
             }
         };
 
-        // --- 2. lettura del body e stima ---
-        let forma = inspect(&richiesta.body, self.config.max_output_default);
-        let Some(modello) = forma.model.clone() else {
-            // nessun modello: non c'è prezzo e non c'è routing. Rispondere 400 qui è
-            // un giudizio sul body che il gateway **non** fa: lo lascia al provider
-            tracing::info!(tenant = %tenant.id, "richiesta senza modello leggibile");
-            return Self::con_provider(
+        // --- 2. reading the body and estimating ---
+        let shape = inspect(&request.body, self.config.max_output_default);
+        let Some(model) = shape.model.clone() else {
+            // no model: no price and no routing. Answering 400 here is a judgment on the
+            // body that the gateway does **not** make: it leaves it to the provider
+            tracing::info!(tenant = %tenant.id, "request with no readable model");
+            return Self::from_gateway(
                 400,
                 b"{\"error\":{\"message\":\"missing model\"}}".to_vec(),
                 None,
             );
         };
 
-        if !self.config.autenticatore.puo_usare(&tenant.id, &modello) {
-            tracing::info!(tenant = %tenant.id, model = %modello, "modello non autorizzato per il tenant");
-            self.config.meter.registr_tetto_negato(&tenant.id);
-            return Self::con_provider(
+        if !self.config.authenticator.can_use(&tenant.id, &model) {
+            tracing::info!(tenant = %tenant.id, model = %model, "model not allowed for the tenant");
+            self.config.meter.record_budget_denied(&tenant.id);
+            return Self::from_gateway(
                 403,
                 br#"{"error":{"message":"model not allowed for this tenant","type":"permission_error"}}"#.to_vec(),
                 None,
             );
         }
 
-        let tetto = self.config.budget.get(&tenant.id);
-        let Some(tetto) = tetto else {
-            // un tenant autenticato senza tetto è una configurazione incoerente:
-            // continuare significherebbe spendere senza controllo
-            tracing::error!(tenant = %tenant.id, "tenant senza tetto registrato");
-            return Self::con_provider(
+        let cap = self.config.budget.get(&tenant.id);
+        let Some(cap) = cap else {
+            // an authenticated tenant with no cap is an inconsistent configuration:
+            // continuing would mean spending without control
+            tracing::error!(tenant = %tenant.id, "tenant with no registered cap");
+            return Self::from_gateway(
                 500,
                 b"{\"error\":{\"message\":\"tenant has no budget\"}}".to_vec(),
                 None,
             );
         };
 
-        let (prezzo, stimato) = self.config.meter.prezzo_per(&modello);
-        let stima = prezzo.cost(
-            forma.estimated_input_tokens,
-            forma.max_output_tokens.unwrap_or(0),
+        let (price, estimated) = self.config.meter.price_for(&model);
+        let estimate = price.cost(
+            shape.estimated_input_tokens,
+            shape.max_output_tokens.unwrap_or(0),
         );
 
-        // --- 3. prenotazione: il tetto vale PRIMA della spesa ---
-        let prenotazione = match tetto.reserve(stima, now) {
+        // --- 3. reservation: the cap holds BEFORE the spending ---
+        let reservation = match cap.reserve(estimate, now) {
             Ok(p) => p,
             Err(ReserveError::Exceeded(e)) => {
                 tracing::warn!(
                     tenant = %tenant.id,
-                    richiesto = e.requested,
-                    disponibile = e.available,
-                    "budget esaurito: 429 senza chiamare alcun provider"
+                    requested = e.requested,
+                    available = e.available,
+                    "budget exhausted: 429 without calling any provider"
                 );
-                self.config.meter.registr_tetto_negato(&tenant.id);
-                return tetto_negato();
+                self.config.meter.record_budget_denied(&tenant.id);
+                return budget_denied();
             }
             Err(ReserveError::State(_)) => {
-                // lo stato del tetto è compromesso. Si **va avanti**: è un problema
-                // del gateway, non del client, e bloccare ogni richiesta per un lock
-                // avvelenato peggiorerebbe le cose
-                tracing::error!(tenant = %tenant.id, "stato del budget non leggibile: si serve senza tetto");
+                // the cap state is compromised. We **move on**: it is a gateway problem,
+                // not a client one, and blocking every request because of a poisoned lock
+                // would make things worse
+                tracing::error!(tenant = %tenant.id, "budget state not readable: serving without the cap");
                 return self
-                    .senza_prenotazione(&tenant.id, &modello, &forma, now)
+                    .without_reservation(&tenant.id, &model, &shape, now)
                     .await;
             }
         };
 
-        // --- 4. inoltro e saldo ---
-        let esito = self
-            .inoltra(&tenant.id, &modello, &forma, richiesta.body)
-            .await;
+        // --- 4. forwarding and settlement ---
+        let outcome = self.forward(&tenant.id, &model, &shape, request.body).await;
 
-        match esito {
-            EsitoRotta::Servita(routed) => {
-                let (status, corpo, uso) = from_response(&routed.response);
-                tetto.settle(prenotazione, uso_cost(&uso, prezzo), now);
-                self.config.meter.registr(
+        match outcome {
+            RouteOutcome::Served(routed) => {
+                let (status, body, usage) = from_response(&routed.response);
+                cap.settle(reservation, usage_cost(&usage, price), now);
+                self.config.meter.record(
                     &tenant.id,
-                    &forma,
-                    uso,
-                    &Esito::Servito {
+                    &shape,
+                    usage,
+                    &Outcome::Served {
                         provider: routed.provider.clone(),
-                        prezzo_stimato: stimato,
+                        price_estimated: estimated,
                     },
                 );
-                to_risposta(status, corpo, routed)
+                to_response(status, body, routed)
             }
-            EsitoRotta::Fallita(errore) => {
-                // nessun provider ha risposto: la prenotazione non è stata spesa,
-                // e va liberata perché il denaro non è uscito
-                tetto.release(prenotazione, now);
-                self.config.meter.registr(
+            RouteOutcome::Failed(error) => {
+                // no provider answered: the reservation was not spent, and it must be
+                // released because the money did not go out
+                cap.release(reservation, now);
+                self.config.meter.record(
                     &tenant.id,
-                    &forma,
+                    &shape,
                     Usage::default(),
-                    &Esito::Fallito {
-                        provider: errore.to_string(),
+                    &Outcome::Failed {
+                        provider: error.to_string(),
                     },
                 );
-                tracing::warn!(tenant = %tenant.id, errore = %errore, "nessun provider ha servito la richiesta");
-                Self::risposta_da_errore(&errore)
+                tracing::warn!(tenant = %tenant.id, error = %error, "no provider served the request");
+                Self::response_from_error(&error)
             }
         }
     }
 
-    /// Il percorso quando lo stato del tetto non è leggibile: si serve senza tetto,
-    /// e si dice. È la via che ADR 0004 chiama "il contabile non fa fallire il
-    /// servizio", applicata al tetto invece che al conto.
-    async fn senza_prenotazione(
+    /// The path when the cap state is not readable: it is served without the cap, and it
+    /// says so. It is the route ADR 0004 calls "the accountant does not bring the service
+    /// down", applied to the cap instead of the accounting.
+    async fn without_reservation(
         &self,
         tenant: &str,
-        modello: &str,
-        forma: &RequestShape,
+        model: &str,
+        shape: &RequestShape,
         now: i64,
-    ) -> Risposta {
+    ) -> GatewayResponse {
         let _ = now;
-        match self.inoltra(tenant, modello, forma, Vec::new()).await {
-            EsitoRotta::Servita(routed) => {
-                self.config.meter.registr_senza_tetto(tenant);
-                let (status, corpo, uso) = from_response(&routed.response);
-                let (_, stimato) = self.config.meter.prezzo_per(modello);
-                self.config.meter.registr(
+        match self.forward(tenant, model, shape, Vec::new()).await {
+            RouteOutcome::Served(routed) => {
+                self.config.meter.record_uncovered(tenant);
+                let (status, body, usage) = from_response(&routed.response);
+                let (_, estimated) = self.config.meter.price_for(model);
+                self.config.meter.record(
                     tenant,
-                    forma,
-                    uso,
-                    &Esito::Servito {
+                    shape,
+                    usage,
+                    &Outcome::Served {
                         provider: routed.provider.clone(),
-                        prezzo_stimato: stimato,
+                        price_estimated: estimated,
                     },
                 );
-                to_risposta(status, corpo, routed)
+                to_response(status, body, routed)
             }
-            EsitoRotta::Fallita(e) => Self::risposta_da_errore(&e),
+            RouteOutcome::Failed(e) => Self::response_from_error(&e),
         }
     }
 
-    /// Inoltra al router. Non è dentro `gestisci` per una ragione sola: il tentativo
-    /// di autenticazione e il tentativo di inoltro non hanno nulla in comune, e
-    /// mescolarli renderebbe `gestisci` illeggibile.
-    async fn inoltra(
+    /// Forwards to the router. It is not inside `handle` for one reason only: the
+    /// authentication attempt and the forwarding attempt have nothing in common, and
+    /// mixing them would make `handle` unreadable.
+    async fn forward(
         &self,
         tenant: &str,
-        modello: &str,
-        forma: &RequestShape,
+        model: &str,
+        shape: &RequestShape,
         body: Vec<u8>,
-    ) -> EsitoRotta {
+    ) -> RouteOutcome {
         let _ = tenant;
-        let _ = forma;
-        let richiesta = UpstreamRequest::new(body, modello.to_owned(), forma.stream);
-        match self.config.router.route(richiesta).await {
-            Ok(routed) => EsitoRotta::Servita(routed),
-            Err(e) => EsitoRotta::Fallita(e),
+        let _ = shape;
+        let request = UpstreamRequest::new(body, model.to_owned(), shape.stream);
+        match self.config.router.route(request).await {
+            Ok(routed) => RouteOutcome::Served(routed),
+            Err(e) => RouteOutcome::Failed(e),
         }
     }
 
-    /// Una risposta costruita dal gateway, non da un provider.
-    fn con_provider(status: u16, body: Vec<u8>, provider: Option<String>) -> Risposta {
-        Risposta::Intera {
+    /// A response built by the gateway, not by a provider.
+    fn from_gateway(status: u16, body: Vec<u8>, provider: Option<String>) -> GatewayResponse {
+        GatewayResponse::Whole {
             status,
             body,
             provider,
         }
     }
 
-    /// Un errore del gateway tradotto in una risposta HTTP.
-    fn rifiuta(errore: ErroreAuth) -> Risposta {
-        match errore {
-            // nessuna chiave: si dice che manca, e si dice anche come si risolve
-            ErroreAuth::Mancata => Self::con_provider(
+    /// A gateway error translated into an HTTP response.
+    fn reject(error: AuthError) -> GatewayResponse {
+        match error {
+            // no key: it says it is missing, and it also says how to solve that
+            AuthError::Missing => Self::from_gateway(
                 401,
                 br#"{"error":{"message":"missing API key","type":"authentication_error"}}"#
                     .to_vec(),
                 None,
             ),
-            ErroreAuth::Sconosciuta => Self::con_provider(
+            AuthError::Unknown => Self::from_gateway(
                 401,
                 br#"{"error":{"message":"invalid API key","type":"authentication_error"}}"#
                     .to_vec(),
                 None,
             ),
-            ErroreAuth::Vuoto => Self::con_provider(
+            AuthError::Empty => Self::from_gateway(
                 401,
                 br#"{"error":{"message":"empty API key","type":"authentication_error"}}"#.to_vec(),
                 None,
@@ -363,25 +357,25 @@ impl Gateway {
         }
     }
 
-    /// Un errore del router tradotto in una risposta, senza rivelare che esiste
-    /// un secondo provider.
-    fn risposta_da_errore(errore: &RouteError) -> Risposta {
-        match errore {
-            // un errore del provider torna al client com'è: è un suo errore, e il
-            // suo corpo spiega perché meglio di una risposta scritta dal gateway
+    /// A router error translated into a response, without revealing that a second
+    /// provider exists.
+    fn response_from_error(error: &RouteError) -> GatewayResponse {
+        match error {
+            // a provider error goes back to the client as it is: it is its error, and its
+            // body explains why better than a response written by the gateway
             RouteError::ClientFault { status, body, .. }
             | RouteError::UnknownStatus { status, body, .. } => {
-                Self::con_provider(*status, body.clone(), None)
+                Self::from_gateway(*status, body.clone(), None)
             }
-            // il provider non poteva, e il prossimo nemmeno: è un fatto del gateway
-            RouteError::ProviderUnavailable { .. } => Self::con_provider(
+            // the provider could not, and neither could the next one: it is a gateway fact
+            RouteError::ProviderUnavailable { .. } => Self::from_gateway(
                 502,
                 br#"{"error":{"message":"all providers failed","type":"api_error"}}"#.to_vec(),
                 None,
             ),
-            RouteError::NoProviderForModel { model, servibili } => {
-                tracing::info!(model = %model, ?servibili, "nessun provider per il modello");
-                Self::con_provider(
+            RouteError::NoProviderForModel { model, available } => {
+                tracing::info!(model = %model, ?available, "no provider for the model");
+                Self::from_gateway(
                     404,
                     format!(
                         r#"{{"error":{{"message":"no provider serves model {model}","type":"not_found_error"}}}}"#
@@ -390,15 +384,15 @@ impl Gateway {
                     None,
                 )
             }
-            RouteError::NoProviders => Self::con_provider(
+            RouteError::NoProviders => Self::from_gateway(
                 503,
                 br#"{"error":{"message":"gateway has no providers configured"}}"#.to_vec(),
                 None,
             ),
-            // qui non si dice "ho provato tre provider": un cliente non può fare
-            // niente con quell'informazione, e un assaltante ne farebbe una mappa
+            // here it does not say "I tried three providers": a client cannot do anything
+            // with that information, and an attacker would make a map out of it
             RouteError::DeliveryUnknown { .. } | RouteError::Exhausted { .. } => {
-                Self::con_provider(
+                Self::from_gateway(
                     502,
                     br#"{"error":{"message":"all providers failed","type":"api_error"}}"#.to_vec(),
                     None,
@@ -408,13 +402,13 @@ impl Gateway {
     }
 }
 
-/// La risposta a un tetto esaurito.
+/// The response to an exhausted cap.
 ///
-/// Qui la cosa importante non è il corpo ma il fatto che **nessun provider è stato
-/// chiamato**: è la differenza fra un tetto e un rendiconto. Un `429` dopo la
-/// chiamata avrebbe già speso il denaro che doveva impedire di spendere.
-fn tetto_negato() -> Risposta {
-    Risposta::Intera {
+/// The important thing here is not the body but the fact that **no provider was called**:
+/// it is the difference between a cap and a report. A `429` after the call would have
+/// already spent the money it was supposed to prevent spending.
+fn budget_denied() -> GatewayResponse {
+    GatewayResponse::Whole {
         status: 429,
         body: br#"{"error":{"message":"monthly budget exhausted","type":"rate_limit_error"}}"#
             .to_vec(),
@@ -422,43 +416,43 @@ fn tetto_negato() -> Risposta {
     }
 }
 
-/// Il corpo di un provider, con l'uso che contiene.
+/// The body of a provider, with the usage it contains.
 fn from_response(response: &crate::upstream::UpstreamResponse) -> (u16, Vec<u8>, Usage) {
     let status = response.status;
     match &response.body {
         ResponseBody::Buffered(b) => (status, b.clone(), parse_usage(b)),
-        // su uno streaming l'uso arriva nell'ultimo chunk e non è disponibile qui:
-        // è il motivo per cui il metering di uno streaming va fatto a valle
+        // on a stream the usage arrives in the last chunk and is not available here:
+        // that is why metering a stream must be done downstream
         ResponseBody::Stream(_) => (status, Vec::new(), Usage::default()),
     }
 }
 
-/// Il costo del consumo reale, dato il prezzo già risolto.
-fn uso_cost(uso: &Usage, prezzo: crate::pricing::Price) -> MicroUsd {
-    uso.cost(prezzo)
+/// The cost of the real consumption, given the price already resolved.
+fn usage_cost(usage: &Usage, price: crate::pricing::Price) -> MicroUsd {
+    usage.cost(price)
 }
 
-/// L'uso dichiarato dal provider.
+/// The usage declared by the provider.
 ///
-/// Se il provider non manda `usage` si conta zero. Il gateway **non** stima a
-/// posteriori: un numero inventato dopo il fatto è peggio di uno zero dichiarato,
-/// e in entrambi i casi la fattura del provider resta la fonte autorevole.
+/// If the provider does not send `usage`, zero is counted. The gateway does **not**
+/// estimate after the fact: a number invented after the fact is worse than a declared
+/// zero, and in both cases the provider's invoice remains the authoritative source.
 fn parse_usage(body: &[u8]) -> Usage {
     match serde_json::from_slice::<RawUsage>(body) {
         Ok(u) => {
-            let uso = u.usage.unwrap_or_default();
+            let usage = u.usage.unwrap_or_default();
             Usage {
-                input_tokens: uso.prompt_tokens,
-                output_tokens: uso.completion_tokens,
+                input_tokens: usage.prompt_tokens,
+                output_tokens: usage.completion_tokens,
             }
         }
         Err(_) => Usage::default(),
     }
 }
 
-/// La forma con cui il provider dichiara l'uso. I nomi sono i suoi, non i nostri:
-/// `Usage` ha `input_tokens`/`output_tokens` perché sono nomi migliori, e la
-/// traduzione sta qui e non nel tipo che il resto del gateway usa.
+/// The shape in which the provider declares usage. The names are its own, not ours:
+/// `Usage` has `input_tokens`/`output_tokens` because those are better names, and the
+/// translation lives here and not in the type the rest of the gateway uses.
 #[derive(serde::Deserialize)]
 struct RawUsage {
     #[serde(default)]
@@ -473,21 +467,21 @@ struct RawUsageBody {
     completion_tokens: u64,
 }
 
-/// La risposta del router, o il motivo per cui non c'è stata.
-enum EsitoRotta {
-    Servita(Routed),
-    Fallita(RouteError),
+/// The router response, or the reason there was none.
+enum RouteOutcome {
+    Served(Routed),
+    Failed(RouteError),
 }
 
-/// Converte la risposta del router in quella del gateway, preservando lo streaming.
-fn to_risposta(status: u16, corpo: Vec<u8>, routed: Routed) -> Risposta {
+/// Converts the router response into the gateway one, preserving streaming.
+fn to_response(status: u16, body: Vec<u8>, routed: Routed) -> GatewayResponse {
     match routed.response.body {
-        ResponseBody::Buffered(_) => Risposta::Intera {
+        ResponseBody::Buffered(_) => GatewayResponse::Whole {
             status,
-            body: corpo,
+            body,
             provider: Some(routed.provider),
         },
-        ResponseBody::Stream(chunks) => Risposta::Flusso {
+        ResponseBody::Stream(chunks) => GatewayResponse::Stream {
             status,
             chunks,
             provider: routed.provider,

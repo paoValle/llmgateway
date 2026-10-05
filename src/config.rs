@@ -1,13 +1,13 @@
-//! La configurazione: come si dichiara un gateway.
+//! Configuration: how a gateway is declared.
 //!
-//! Un principio solo, che vale per tutto il file: **nessun segreto qui dentro.** Le
-//! chiavi si prendono dall'ambiente, e la configurazione dice *dove* cercarle. Il
-//! file è committabile, il diff è leggibile, e non c'è un `api_key = "sk-..."` che
-//! qualcuno lascia in un repository.
+//! One principle only, and it holds for the whole file: **no secrets in here.** Keys
+//! are taken from the environment, and the configuration says *where* to look for them.
+//! The file is committable, the diff is readable, and there is no `api_key = "sk-..."`
+//! left in a repository by someone.
 //!
-//! La validazione **raccoglie tutti** gli errori prima di dichiararli. Una
-//! configurazione che si ferma al primo problema obbliga a un viaggio di andata e
-//! ritorno per ogni errore; una che li elenca tutti fa il lavoro una volta sola.
+//! Validation **collects all** errors before reporting them. A configuration that stops
+//! at the first problem forces a round trip per error; one that lists them all does the
+//! work once.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -17,20 +17,20 @@ use serde::Deserialize;
 
 use crate::pricing::{Price, PriceTable};
 
-/// La configurazione completa.
+/// The complete configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Dove ascolta e quanto tollera. Di default: valori ragionevoli.
+    /// Where it listens and how much it tolerates. By default: sensible values.
     #[serde(default)]
     pub server: ServerConfig,
-    /// I provider, in ordine di preferenza.
+    /// The providers, in order of preference.
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
-    /// I prezzi per modello, in dollari per milione di token.
+    /// The prices per model, in dollars per million tokens.
     #[serde(default)]
     pub pricing: BTreeMap<String, PriceDollars>,
-    /// I tenant che possono usare il gateway.
+    /// The tenants that may use the gateway.
     #[serde(default)]
     pub tenants: Vec<TenantConfig>,
 }
@@ -39,28 +39,29 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
-    /// Indirizzo di ascolto.
+    /// Listen address.
     #[serde(default = "default_bind")]
     pub bind: String,
-    /// Tetto di attesa per una chiamata upstream. 60 s di default: sotto, un
-    /// provider lento sembra morto.
+    /// Wait cap for one upstream call. 60 s by default: below that, a slow provider
+    /// looks dead.
     #[serde(default = "default_timeout_ms")]
     pub request_timeout_ms: u64,
-    /// Tetto di tentativi **complessivi**, su tutti i provider.
+    /// Cap on **total** attempts, across all providers.
     ///
-    /// Il failover che non ha un tetto è un attacco che si autoalimenta (`DDoS`): ogni provider
-    /// che non risponde porta a provare il successivo, e se i provider non
-    /// rispondono tutti si moltiplica il carico proprio quando è già al limite.
+    /// Failover without a cap is a self-feeding attack (`DDoS`): every provider that does
+    /// not answer leads to trying the next one, and if the providers are all unresponsive
+    /// it multiplies load exactly when load is already at the limit.
     #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
-    /// Tasso di campionamento delle metriche operative: 1 su N. 1 = esatte.
+    /// Operating metric sampling rate: 1 in N. 1 = exact.
     #[serde(default = "default_sample_rate")]
     pub metrics_sample_rate: u64,
 }
 
 impl Default for ServerConfig {
-    /// Scritto a mano e non derivato: i default qui sono scelte, non valori neutri,
-    /// e `derive(Default)` darebbe zeri — un bind a `0.0.0.0:0` e un timeout nullo.
+    /// Written by hand and not derived: the defaults here are choices, not neutral
+    /// values, and `derive(Default)` would give zeros — a bind to `0.0.0.0:0` and a null
+    /// timeout.
     fn default() -> Self {
         Self {
             bind: default_bind(),
@@ -71,57 +72,58 @@ impl Default for ServerConfig {
     }
 }
 
-/// Un `[[providers]]`.
+/// A `[[providers]]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
-    /// Nome usato nei log e nelle metriche.
+    /// Name used in logs and metrics.
     pub name: String,
-    /// Base URL dell'API, senza lo `/chat/completions`.
+    /// Base URL of the API, without `/chat/completions`.
     pub base_url: String,
-    /// Variabile d'ambiente che contiene la chiave. **Non** la chiave.
+    /// Environment variable holding the key. **Not** the key.
     pub api_key_env: String,
-    /// Ordine di preferenza: più basso prima.
+    /// Order of preference: lower first.
     #[serde(default = "default_priority")]
     pub priority: u32,
-    /// Modelli che questo provider serve. Vuoto = "tutti quelli che dichiara il tenant".
+    /// Models this provider serves. Empty = "all the ones the tenant declares".
     #[serde(default)]
     pub models: BTreeSet<String>,
 }
 
-/// Un `[[tenants]]`.
+/// A `[[tenants]]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TenantConfig {
-    /// Identificatore del tenant: compare nelle metriche e nei log.
+    /// Tenant identifier: it appears in metrics and logs.
     pub id: String,
-    /// Variabile d'ambiente che contiene la chiave di questo tenant.
+    /// Environment variable holding this tenant's key.
     ///
-    /// Il gateway la cerca in arrivo e ne confronta il valore. La chiave non
-    /// transita in nessun log (vedi `redact.rs`).
+    /// The gateway looks it up on arrival and compares its value. The key never travels
+    /// through any log (see `redact.rs`).
     pub key_env: String,
-    /// Tetto mensile, in dollari.
+    /// Monthly cap, in dollars.
     pub monthly_budget_usd: f64,
-    /// Modelli che questo tenant può usare. Vuoto = tutti.
+    /// Models this tenant may use. Empty = all.
     #[serde(default)]
     pub models: BTreeSet<String>,
 }
 
-/// Prezzi nel formato che si scrive a mano: dollari per milione di token.
+/// Prices in the format you write by hand: dollars per million tokens.
 ///
-/// `serde` lo converte in micro-dollari interi al momento del caricamento: nel resto
-/// del programma non esiste un `f64` che tocchi un prezzo.
+/// `serde` converts it into integer micro-dollars at load time: in the rest of the
+/// program there is no `f64` that touches a price.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PriceDollars {
-    /// Dollari per milione di token di input.
+    /// Dollars per million input tokens.
     pub input: f64,
-    /// Dollari per milione di token di output.
+    /// Dollars per million output tokens.
     pub output: f64,
 }
 
 impl PriceDollars {
-    /// La conversione in micro-dollari, o `None` se il prezzo è negativo o non finito.
+    /// The conversion into micro-dollars, or `None` if the price is negative or not
+    /// finite.
     #[must_use]
     pub fn to_micro(self) -> Option<(crate::pricing::MicroUsd, crate::pricing::MicroUsd)> {
         crate::pricing::usd(self.input).zip(crate::pricing::usd(self.output))
@@ -144,12 +146,12 @@ const fn default_sample_rate() -> u64 {
     100
 }
 
-/// Un problema della configurazione, con il posto in cui si trova.
+/// A configuration problem, with the place where it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigError {
-    /// Percorso nel file, es. `tenants[0].monthly_budget_usd`.
+    /// Path in the file, e.g. `tenants[0].monthly_budget_usd`.
     pub field: String,
-    /// Cosa non torna, in una frase.
+    /// What is wrong, in one sentence.
     pub problem: String,
 }
 
@@ -161,61 +163,61 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-/// Il risultato di caricare e validare una configurazione.
+/// The result of loading and validating a configuration.
 #[derive(Debug)]
 pub struct LoadedConfig {
-    /// La configurazione con i prezzi già convertiti in micro-dollari interi.
+    /// The configuration with prices already converted into integer micro-dollars.
     pub config: ValidatedConfig,
-    /// Le chiavi dei tenant lette dall'ambiente, indicizzate per id tenant.
+    /// The tenant keys read from the environment, indexed by tenant id.
     pub keys: BTreeMap<String, String>,
-    /// Le chiavi dei provider lette dall'ambiente, indicizzate per nome provider.
+    /// The provider keys read from the environment, indexed by provider name.
     pub provider_keys: BTreeMap<String, String>,
 }
 
-/// Configurazione validata: dopo questo punto i campi sono coerenti per costruzione.
+/// Validated configuration: past this point the fields are consistent by construction.
 #[derive(Debug)]
 pub struct ValidatedConfig {
-    /// Impostazioni del server.
+    /// Server settings.
     pub server: ServerConfig,
-    /// Provider, **già ordinati** per priorità.
+    /// Providers, **already sorted** by priority.
     pub providers: Vec<ProviderConfig>,
-    /// Prezzi in micro-dollari interi.
+    /// Prices in integer micro-dollars.
     pub pricing: PriceTable,
-    /// Tenant dichiarati, nell'ordine del file.
+    /// Declared tenants, in file order.
     pub tenants: Vec<TenantConfig>,
-    /// Tenant per identificatore, per lookup in O(1) nel percorso caldo.
+    /// Tenants by identifier, for O(1) lookup on the hot path.
     pub tenants_by_id: BTreeMap<String, usize>,
 }
 
-/// Carica da una stringa TOML e valida.
+/// Loads from a TOML string and validates.
 pub fn from_toml(source: &str) -> Result<LoadedConfig, Vec<ConfigError>> {
     let config: Config = toml::from_str(source).map_err(|e| {
         vec![ConfigError {
             field: "(file)".to_owned(),
-            problem: format!("non è TOML valido: {e}"),
+            problem: format!("not valid TOML: {e}"),
         }]
     })?;
     validate(&config, &real_env)
 }
 
-/// Carica da un file.
+/// Loads from a file.
 pub fn from_path(path: &Path) -> Result<LoadedConfig, Vec<ConfigError>> {
     let source = std::fs::read_to_string(path).map_err(|e| {
         vec![ConfigError {
             field: path.display().to_string(),
-            problem: format!("non si può leggere: {e}"),
+            problem: format!("cannot be read: {e}"),
         }]
     })?;
     from_toml(&source)
 }
 
-/// La funzione che legge le variabili d'ambiente, sostituibile nei test.
+/// The function that reads environment variables, replaceable in tests.
 pub type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
 
-/// Valida e risolve le chiavi dall'ambiente.
+/// Validates and resolves the keys from the environment.
 ///
-/// Raccolge **tutti** gli errori invece di fermarsi al primo: una configurazione con
-/// tre problemi va corretta in un colpo, non in tre viaggi.
+/// It collects **all** errors instead of stopping at the first one: a configuration with
+/// three problems must be fixed in one go, not in three trips.
 pub fn validate(config: &Config, env: EnvLookup<'_>) -> Result<LoadedConfig, Vec<ConfigError>> {
     let mut ctx = Context::default();
 
@@ -225,12 +227,12 @@ pub fn validate(config: &Config, env: EnvLookup<'_>) -> Result<LoadedConfig, Vec
     check_tenants(config, env, &mut ctx);
     cross_checks(config, &mut ctx);
 
-    if !ctx.errori.is_empty() {
-        return Err(ctx.errori);
+    if !ctx.errors.is_empty() {
+        return Err(ctx.errors);
     }
 
-    // l'ordinamento dei provider è parte del contratto: il failover segue la
-    // priorità dichiarata, e senza questo sort non è deterministico
+    // the ordering of the providers is part of the contract: failover follows the
+    // declared priority, and without this sort it is not deterministic
     let mut providers = providers;
     providers.sort_by_key(|p| p.priority);
 
@@ -238,7 +240,7 @@ pub fn validate(config: &Config, env: EnvLookup<'_>) -> Result<LoadedConfig, Vec
         config: ValidatedConfig {
             server: config.server.clone(),
             providers,
-            pricing: PriceTable::new(ctx.prezzi),
+            pricing: PriceTable::new(ctx.prices),
             tenants: config.tenants.clone(),
             tenants_by_id: ctx.tenants_by_id,
         },
@@ -247,20 +249,20 @@ pub fn validate(config: &Config, env: EnvLookup<'_>) -> Result<LoadedConfig, Vec
     })
 }
 
-/// Lo stato che le fasi di validazione si passano.
+/// The state the validation phases pass to one another.
 #[derive(Default)]
 struct Context {
-    errori: Vec<ConfigError>,
-    prezzi: BTreeMap<String, Price>,
+    errors: Vec<ConfigError>,
+    prices: BTreeMap<String, Price>,
     keys: BTreeMap<String, String>,
     provider_keys: BTreeMap<String, String>,
     tenants_by_id: BTreeMap<String, usize>,
 }
 
 impl Context {
-    /// Segna un problema. Non ritorna mai: la validazione raccoglie, non interrompe.
+    /// Records a problem. It never returns: validation collects, it does not interrupt.
     fn add(&mut self, field: impl Into<String>, problem: impl Into<String>) {
-        self.errori.push(ConfigError {
+        self.errors.push(ConfigError {
             field: field.into(),
             problem: problem.into(),
         });
@@ -271,19 +273,19 @@ fn check_server(config: &Config, ctx: &mut Context) {
     if config.server.max_attempts == 0 {
         ctx.add(
             "server.max_attempts",
-            "deve essere almeno 1: con 0 nessuna richiesta passerebbe",
+            "must be at least 1: with 0 no request would pass",
         );
     }
     if config.server.metrics_sample_rate == 0 {
         ctx.add(
             "server.metrics_sample_rate",
-            "deve essere almeno 1: con 0 nessuna metrica sarebbe campionata",
+            "must be at least 1: with 0 no metric would be sampled",
         );
     }
     if config.server.request_timeout_ms == 0 {
         ctx.add(
             "server.request_timeout_ms",
-            "deve essere almeno 1: un timeout nullo rifiuta ogni richiesta",
+            "must be at least 1: a null timeout rejects every request",
         );
     }
 }
@@ -292,51 +294,51 @@ fn check_providers(config: &Config, env: EnvLookup<'_>, ctx: &mut Context) -> Ve
     if config.providers.is_empty() {
         ctx.add(
             "providers",
-            "serve almeno un provider: senza, il gateway non può inoltrare nulla",
+            "at least one provider is needed: without one, the gateway cannot forward anything",
         );
     }
 
-    let mut nomi = BTreeSet::new();
-    let mut priorità = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    let mut priorities = BTreeSet::new();
 
     for (i, p) in config.providers.iter().enumerate() {
-        let campo = format!("providers[{i}]");
+        let field = format!("providers[{i}]");
 
         if p.name.trim().is_empty() {
             ctx.add(
-                format!("{campo}.name"),
-                "il nome non può essere vuoto: è la chiave nei log",
+                format!("{field}.name"),
+                "the name cannot be empty: it is the key in the logs",
             );
-        } else if !nomi.insert(p.name.clone()) {
+        } else if !names.insert(p.name.clone()) {
             ctx.add(
-                format!("{campo}.name"),
-                format!("il provider {:?} è dichiarato due volte", p.name),
+                format!("{field}.name"),
+                format!("provider {:?} is declared twice", p.name),
             );
         }
 
         if p.base_url.trim().is_empty() {
-            ctx.add(format!("{campo}.base_url"), "la base URL è obbligatoria");
+            ctx.add(format!("{field}.base_url"), "the base URL is required");
         } else if !(p.base_url.starts_with("http://") || p.base_url.starts_with("https://")) {
             ctx.add(
-                format!("{campo}.base_url"),
+                format!("{field}.base_url"),
                 format!(
-                    "{:?} non sembra un URL: attesi http:// o https://",
+                    "{:?} does not look like a URL: http:// or https:// expected",
                     p.base_url
                 ),
             );
         }
 
-        if let Some(segreto) =
-            check_secret(&format!("{campo}.api_key_env"), &p.api_key_env, env, ctx)
+        if let Some(secret) =
+            check_secret(&format!("{field}.api_key_env"), &p.api_key_env, env, ctx)
         {
-            ctx.provider_keys.insert(p.name.clone(), segreto);
+            ctx.provider_keys.insert(p.name.clone(), secret);
         }
 
-        if !priorità.insert(p.priority) {
+        if !priorities.insert(p.priority) {
             ctx.add(
-                format!("{campo}.priority"),
+                format!("{field}.priority"),
                 format!(
-                    "la priorità {} è già usuta: senza un ordine, il failover non è deterministico",
+                    "priority {} is already used: without an order, failover is not deterministic",
                     p.priority
                 ),
             );
@@ -347,27 +349,27 @@ fn check_providers(config: &Config, env: EnvLookup<'_>, ctx: &mut Context) -> Ve
 }
 
 fn check_pricing(config: &Config, ctx: &mut Context) {
-    let mut invalidi = Vec::new();
-    for (modello, p) in &config.pricing {
+    let mut invalid = Vec::new();
+    for (model, p) in &config.pricing {
         match p.to_micro() {
             Some((input, output)) => {
-                ctx.prezzi.insert(modello.clone(), Price { input, output });
+                ctx.prices.insert(model.clone(), Price { input, output });
             }
-            None => invalidi.push(modello.clone()),
+            None => invalid.push(model.clone()),
         }
     }
 
-    for modello in invalidi {
+    for model in invalid {
         ctx.add(
-            format!("pricing.{modello}"),
-            "prezzo negativo o non finito: un listino negativo è un errore di battitura, non uno sconto",
+            format!("pricing.{model}"),
+            "negative or non-finite price: a negative price list is a typo, not a discount",
         );
     }
 
-    if ctx.prezzi.is_empty() {
+    if ctx.prices.is_empty() {
         ctx.add(
             "pricing",
-            "serve almeno un prezzo: senza, ogni richiesta costa zero e il tetto non protegge niente",
+            "at least one price is needed: without one every request costs zero and the cap protects nothing",
         );
     }
 }
@@ -376,22 +378,22 @@ fn check_tenants(config: &Config, env: EnvLookup<'_>, ctx: &mut Context) {
     if config.tenants.is_empty() {
         ctx.add(
             "tenants",
-            "serve almeno un tenant: senza, nessuno può usare il gateway",
+            "at least one tenant is needed: without one, nobody can use the gateway",
         );
     }
 
     for (i, t) in config.tenants.iter().enumerate() {
-        let campo = format!("tenants[{i}]");
+        let field = format!("tenants[{i}]");
 
         if t.id.trim().is_empty() {
             ctx.add(
-                format!("{campo}.id"),
-                "l'id non può essere vuoto: è la chiave delle metriche",
+                format!("{field}.id"),
+                "the id cannot be empty: it is the key of the metrics",
             );
         } else if ctx.tenants_by_id.contains_key(&t.id) {
             ctx.add(
-                format!("{campo}.id"),
-                format!("il tenant {:?} è dichiarato due volte", t.id),
+                format!("{field}.id"),
+                format!("tenant {:?} is declared twice", t.id),
             );
         } else {
             ctx.tenants_by_id.insert(t.id.clone(), i);
@@ -399,80 +401,80 @@ fn check_tenants(config: &Config, env: EnvLookup<'_>, ctx: &mut Context) {
 
         match crate::pricing::usd(t.monthly_budget_usd) {
             None => ctx.add(
-                format!("{campo}.monthly_budget_usd"),
-                "il tetto deve essere un numero positivo e finito",
+                format!("{field}.monthly_budget_usd"),
+                "the cap must be a positive and finite number",
             ),
             Some(0) => ctx.add(
-                format!("{campo}.monthly_budget_usd"),
-                "un tetto di zero non consente richieste: se è voluto, rimuovi il tenant",
+                format!("{field}.monthly_budget_usd"),
+                "a cap of zero allows no requests: if that is intended, remove the tenant",
             ),
             Some(_) => {}
         }
 
-        if let Some(segreto) = check_secret(&format!("{campo}.key_env"), &t.key_env, env, ctx) {
-            ctx.keys.insert(t.id.clone(), segreto);
+        if let Some(secret) = check_secret(&format!("{field}.key_env"), &t.key_env, env, ctx) {
+            ctx.keys.insert(t.id.clone(), secret);
         }
     }
 }
 
-/// Risolve un segreto dall'ambiente.
+/// Resolves a secret from the environment.
 ///
-/// Un segreto che manca è un **errore di avvio**, non un problema da scoprire alla
-/// prima richiesta: a quel punto il failover ha già provato un provider che non
-/// poteva funzionare, e il tempo perso è dell'utente finale.
+/// A missing secret is a **startup error**, not a problem to discover on the first
+/// request: by then failover has already tried a provider that could not work, and the
+/// time lost belongs to the end user.
 ///
-/// Restituisce il problema come stringa invece di scriverlo: chi chiama decide dove
-/// finisce, perché provider e tenant hanno mappe diverse.
+/// It returns the problem as a string instead of writing it: the caller decides where it
+/// goes, because providers and tenants have different maps.
 fn resolve_secret(
-    campo: &str,
+    field: &str,
     env_var: &str,
     env: EnvLookup<'_>,
 ) -> Result<String, (String, String)> {
     if env_var.trim().is_empty() {
         return Err((
-            campo.to_owned(),
-            "serve il nome della variabile d'ambiente con la chiave".to_owned(),
+            field.to_owned(),
+            "the name of the environment variable with the key is needed".to_owned(),
         ));
     }
     match env(env_var) {
         Some(v) if v.trim().is_empty() => {
-            Err((campo.to_owned(), format!("la variabile {env_var} è vuota")))
+            Err((field.to_owned(), format!("variable {env_var} is empty")))
         }
         Some(v) => Ok(v),
         None => Err((
-            campo.to_owned(),
-            format!("la variabile d'ambiente {env_var} non è impostata"),
+            field.to_owned(),
+            format!("environment variable {env_var} is not set"),
         )),
     }
 }
 
-/// Come [`resolve_secret`], ma il problema finisce subito nella raccolta.
+/// Like [`resolve_secret`], but the problem goes straight into the collection.
 fn check_secret(
-    campo: &str,
+    field: &str,
     env_var: &str,
     env: EnvLookup<'_>,
     ctx: &mut Context,
 ) -> Option<String> {
-    match resolve_secret(campo, env_var, env) {
-        Ok(segreto) => Some(segreto),
-        Err((campo, problema)) => {
-            ctx.add(campo, problema);
+    match resolve_secret(field, env_var, env) {
+        Ok(secret) => Some(secret),
+        Err((field, problem)) => {
+            ctx.add(field, problem);
             None
         }
     }
 }
 
-/// I controlli che non stanno dentro una sezione sola.
+/// The checks that do not fit inside a single section.
 ///
-/// Sono qui perché riguardano due sezioni insieme: è il posto in cui si vedono i
-/// buchi che un controllo secco non trova.
+/// They are here because they involve two sections at once: this is where the holes a
+/// single check cannot find become visible.
 fn cross_checks(config: &Config, ctx: &mut Context) {
     for (i, t) in config.tenants.iter().enumerate() {
-        if !t.models.is_empty() && t.models.iter().all(|m| !ctx.prezzi.contains_key(m)) {
+        if !t.models.is_empty() && t.models.iter().all(|m| !ctx.prices.contains_key(m)) {
             ctx.add(
                 format!("tenants[{i}].models"),
                 format!(
-                    "nessuno dei modelli {:?} ha un prezzo dichiarato: il tenant potrebbe spendere senza essere conteggiato",
+                    "none of the models {:?} has a declared price: the tenant could spend without being counted",
                     t.models
                 ),
             );
@@ -480,7 +482,7 @@ fn cross_checks(config: &Config, ctx: &mut Context) {
     }
 }
 
-/// Legge davvero dall'ambiente del processo.
+/// Really reads from the process environment.
 #[must_use]
 pub fn real_env(name: &str) -> Option<String> {
     env::var(name).ok()
@@ -491,12 +493,12 @@ mod tests {
     use super::*;
     use crate::pricing::usd;
 
-    fn ambiente(variabili: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let mappa: BTreeMap<String, String> = variabili
+    fn env_from(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: BTreeMap<String, String> = vars
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
-        move |nome: &str| mappa.get(nome).cloned()
+        move |name: &str| map.get(name).cloned()
     }
 
     const BASE: &str = r#"
@@ -516,13 +518,13 @@ monthly_budget_usd = 50.0
 "#;
 
     #[test]
-    fn una_configurazione_minima_ma_sensata_si_carica() {
-        let chiavi: [(&str, &str); 2] = [
-            ("TENANT_ACME", "segreto-di-prova"),
+    fn a_minimal_but_sensible_configuration_loads() {
+        let keys: [(&str, &str); 2] = [
+            ("TENANT_ACME", "test-secret"),
             ("OPENAI_API_KEY", "sk-openai"),
         ];
-        let cfg: Config = toml::from_str(BASE).expect("TOML valido");
-        let loaded = validate(&cfg, &ambiente(&chiavi)).expect("configurazione valida");
+        let cfg: Config = toml::from_str(BASE).expect("valid TOML");
+        let loaded = validate(&cfg, &env_from(&keys)).expect("valid configuration");
 
         assert_eq!(loaded.config.server.bind, "127.0.0.1:8080");
         assert_eq!(loaded.config.server.max_attempts, 4);
@@ -532,32 +534,32 @@ monthly_budget_usd = 50.0
         );
         assert_eq!(
             loaded.keys.get("acme").map(String::as_str),
-            Some("segreto-di-prova")
+            Some("test-secret")
         );
     }
 
     #[test]
-    fn il_tenant_si_trova_per_id_in_tempo_costante() {
-        let chiavi: [(&str, &str); 2] = [("TENANT_ACME", "x"), ("OPENAI_API_KEY", "k")];
-        let cfg: Config = toml::from_str(BASE).expect("TOML valido");
-        let loaded = validate(&cfg, &ambiente(&chiavi)).expect("valida");
-        let indice = loaded.config.tenants_by_id["acme"];
-        assert_eq!(loaded.config.tenants[indice].id, "acme");
+    fn the_tenant_is_found_by_id_in_constant_time() {
+        let keys: [(&str, &str); 2] = [("TENANT_ACME", "x"), ("OPENAI_API_KEY", "k")];
+        let cfg: Config = toml::from_str(BASE).expect("valid TOML");
+        let loaded = validate(&cfg, &env_from(&keys)).expect("valid");
+        let index = loaded.config.tenants_by_id["acme"];
+        assert_eq!(loaded.config.tenants[index].id, "acme");
     }
 
     #[test]
-    fn i_provider_vengono_ordinati_per_priorità() {
+    fn providers_are_sorted_by_priority() {
         let toml = r#"
 [[providers]]
-name = "lento"
-base_url = "https://lento.example.com/v1"
-api_key_env = "K_LENTO"
+name = "slow"
+base_url = "https://slow.example.com/v1"
+api_key_env = "K_SLOW"
 priority = 10
 
 [[providers]]
-name = "veloce"
-base_url = "https://veloce.example.com/v1"
-api_key_env = "K_VELOCE"
+name = "fast"
+base_url = "https://fast.example.com/v1"
+api_key_env = "K_FAST"
 priority = 1
 
 [pricing]
@@ -568,53 +570,54 @@ id = "acme"
 key_env = "K_TENANT"
 monthly_budget_usd = 10.0
 "#;
-        let chiavi: [(&str, &str); 3] = [("K_LENTO", "a"), ("K_VELOCE", "b"), ("K_TENANT", "c")];
-        let cfg: Config = toml::from_str(toml).expect("TOML valido");
-        let loaded = validate(&cfg, &ambiente(&chiavi)).expect("valida");
-        assert_eq!(loaded.config.providers[0].name, "veloce");
-        assert_eq!(loaded.config.providers[1].name, "lento");
+        let keys: [(&str, &str); 3] = [("K_SLOW", "a"), ("K_FAST", "b"), ("K_TENANT", "c")];
+        let cfg: Config = toml::from_str(toml).expect("valid TOML");
+        let loaded = validate(&cfg, &env_from(&keys)).expect("valid");
+        assert_eq!(loaded.config.providers[0].name, "fast");
+        assert_eq!(loaded.config.providers[1].name, "slow");
     }
 
     #[test]
-    fn una_chiave_che_non_esiste_è_un_errore_di_avvio() {
-        let cfg: Config = toml::from_str(BASE).expect("TOML valido");
-        let errori = validate(&cfg, &ambiente(&[])).expect_err("mancano le variabili d'ambiente");
+    fn a_key_that_does_not_exist_is_a_startup_error() {
+        let cfg: Config = toml::from_str(BASE).expect("valid TOML");
+        let errors =
+            validate(&cfg, &env_from(&[])).expect_err("the environment variables are missing");
 
-        // sia quella del tenant sia quella del provider: una chiave mancante
-        // scoperta alla prima richiesta fa perdere tempo all'utente finale
-        assert_eq!(errori.len(), 2);
-        assert!(errori.iter().any(|e| e.field == "tenants[0].key_env"));
-        assert!(errori.iter().any(|e| e.field == "providers[0].api_key_env"));
-        assert!(errori.iter().all(|e| e.problem.contains("non è impostata")));
+        // both the tenant one and the provider one: a missing key discovered on the
+        // first request wastes the end user's time
+        assert_eq!(errors.len(), 2);
+        assert!(errors.iter().any(|e| e.field == "tenants[0].key_env"));
+        assert!(errors.iter().any(|e| e.field == "providers[0].api_key_env"));
+        assert!(errors.iter().all(|e| e.problem.contains("is not set")));
     }
 
     #[test]
-    fn tutti_gli_errori_vengono_raccolti_non_uno_alla_volta() {
+    fn all_errors_are_collected_not_one_at_a_time() {
         let toml = r#"
 [[providers]]
 name = "a"
-base_url = "non-una-url"
+base_url = "not-a-url"
 api_key_env = ""
 
 [pricing]
 
 [[tenants]]
 id = "x"
-key_env = "MANCANTE"
+key_env = "MISSING"
 monthly_budget_usd = -5.0
 "#;
-        let cfg: Config = toml::from_str(toml).expect("TOML valido");
-        let errori = validate(&cfg, &ambiente(&[])).expect_err("tanti problemi");
-        // base_url, api_key_env, pricing vuota, key_env mancante, budget negativo
+        let cfg: Config = toml::from_str(toml).expect("valid TOML");
+        let errors = validate(&cfg, &env_from(&[])).expect_err("many problems");
+        // base_url, api_key_env, empty pricing, missing key_env, negative budget
         assert!(
-            errori.len() >= 5,
-            "raccolti solo {} errori: {errori:?}",
-            errori.len()
+            errors.len() >= 5,
+            "only {} errors collected: {errors:?}",
+            errors.len()
         );
     }
 
     #[test]
-    fn un_prezzo_negativo_è_errore_di_battitura_nonuno_sconto() {
+    fn a_negative_price_is_a_typo_not_a_discount() {
         let toml = r#"
 [[providers]]
 name = "a"
@@ -629,14 +632,14 @@ id = "x"
 key_env = "K"
 monthly_budget_usd = 10.0
 "#;
-        let chiavi: [(&str, &str); 1] = [("K", "segreto")];
-        let cfg: Config = toml::from_str(toml).expect("TOML valido");
-        let errori = validate(&cfg, &ambiente(&chiavi)).expect_err("prezzo negativo");
-        assert!(errori.iter().any(|e| e.field == "pricing.m"));
+        let keys: [(&str, &str); 1] = [("K", "secret")];
+        let cfg: Config = toml::from_str(toml).expect("valid TOML");
+        let errors = validate(&cfg, &env_from(&keys)).expect_err("negative price");
+        assert!(errors.iter().any(|e| e.field == "pricing.m"));
     }
 
     #[test]
-    fn una_tabella_prezzi_vuota_disattiverebbe_il_tetto() {
+    fn an_empty_price_table_would_disable_the_cap() {
         let toml = r#"
 [[providers]]
 name = "a"
@@ -648,14 +651,14 @@ id = "x"
 key_env = "K"
 monthly_budget_usd = 10.0
 "#;
-        let chiavi: [(&str, &str); 1] = [("K", "segreto")];
-        let cfg: Config = toml::from_str(toml).expect("TOML valido");
-        let errori = validate(&cfg, &ambiente(&chiavi)).expect_err("nessun prezzo");
-        assert!(errori.iter().any(|e| e.problem.contains("costa zero")));
+        let keys: [(&str, &str); 1] = [("K", "secret")];
+        let cfg: Config = toml::from_str(toml).expect("valid TOML");
+        let errors = validate(&cfg, &env_from(&keys)).expect_err("no price");
+        assert!(errors.iter().any(|e| e.problem.contains("costs zero")));
     }
 
     #[test]
-    fn due_provider_con_la_stessa_priorita_non_hanno_un_ordine() {
+    fn two_providers_with_the_same_priority_have_no_order() {
         let toml = r#"
 [[providers]]
 name = "a"
@@ -677,21 +680,21 @@ id = "x"
 key_env = "K"
 monthly_budget_usd = 10.0
 "#;
-        let chiavi: [(&str, &str); 1] = [("K", "segreto")];
-        let cfg: Config = toml::from_str(toml).expect("TOML valido");
-        let errori = validate(&cfg, &ambiente(&chiavi)).expect_err("priorità ambigua");
-        assert!(errori
+        let keys: [(&str, &str); 1] = [("K", "secret")];
+        let cfg: Config = toml::from_str(toml).expect("valid TOML");
+        let errors = validate(&cfg, &env_from(&keys)).expect_err("ambiguous priority");
+        assert!(errors
             .iter()
-            .any(|e| e.problem.contains("non è deterministico")));
+            .any(|e| e.problem.contains("not deterministic")));
     }
 
     #[test]
-    fn una_chiave_di_provider_che_non_esiste_e_un_problema() {
+    fn a_provider_key_that_does_not_exist_is_a_problem() {
         let toml = r#"
 [[providers]]
 name = "a"
 base_url = "https://a.example.com"
-api_key_env = "NON_ESISTE"
+api_key_env = "DOES_NOT_EXIST"
 
 [pricing]
 "m" = { input = 1.0, output = 1.0 }
@@ -701,14 +704,14 @@ id = "x"
 key_env = "K"
 monthly_budget_usd = 10.0
 "#;
-        let chiavi: [(&str, &str); 1] = [("K", "segreto")];
-        let cfg: Config = toml::from_str(toml).expect("TOML valido");
-        let errori = validate(&cfg, &ambiente(&chiavi)).expect_err("chiave provider mancante");
-        assert!(errori.iter().any(|e| e.field == "providers[0].api_key_env"));
+        let keys: [(&str, &str); 1] = [("K", "secret")];
+        let cfg: Config = toml::from_str(toml).expect("valid TOML");
+        let errors = validate(&cfg, &env_from(&keys)).expect_err("missing provider key");
+        assert!(errors.iter().any(|e| e.field == "providers[0].api_key_env"));
     }
 
     #[test]
-    fn un_tenant_che_puo_usare_solo_modelli_senza_prezzo_e_muto() {
+    fn a_tenant_that_can_only_use_unpriced_models_is_muted() {
         let toml = r#"
 [[providers]]
 name = "a"
@@ -716,22 +719,22 @@ base_url = "https://a.example.com"
 api_key_env = "K"
 
 [pricing]
-"a-prezzato" = { input = 1.0, output = 1.0 }
+"a-priced" = { input = 1.0, output = 1.0 }
 
 [[tenants]]
 id = "x"
 key_env = "K"
 monthly_budget_usd = 10.0
-models = ["a-prezzato", "b-non-prezzato"]
+models = ["a-priced", "b-unpriced"]
 "#;
-        let chiavi: [(&str, &str); 1] = [("K", "segreto")];
-        let cfg: Config = toml::from_str(toml).expect("TOML valido");
-        let loaded = validate(&cfg, &ambiente(&chiavi)).expect("ha almeno un modello prezzato");
-        assert!(loaded.config.tenants[0].models.contains("b-non-prezzato"));
+        let keys: [(&str, &str); 1] = [("K", "secret")];
+        let cfg: Config = toml::from_str(toml).expect("valid TOML");
+        let loaded = validate(&cfg, &env_from(&keys)).expect("it has at least one priced model");
+        assert!(loaded.config.tenants[0].models.contains("b-unpriced"));
     }
 
     #[test]
-    fn un_tetto_mensile_negativo_non_e_un_tetto() {
+    fn a_negative_monthly_cap_is_not_a_cap() {
         let toml = r#"
 [[providers]]
 name = "a"
@@ -746,18 +749,18 @@ id = "x"
 key_env = "K"
 monthly_budget_usd = -1.0
 "#;
-        let chiavi: [(&str, &str); 1] = [("K", "segreto")];
-        let cfg: Config = toml::from_str(toml).expect("TOML valido");
-        let errori = validate(&cfg, &ambiente(&chiavi)).expect_err("tetto negativo");
-        assert!(errori
+        let keys: [(&str, &str); 1] = [("K", "secret")];
+        let cfg: Config = toml::from_str(toml).expect("valid TOML");
+        let errors = validate(&cfg, &env_from(&keys)).expect_err("negative cap");
+        assert!(errors
             .iter()
             .any(|e| e.field == "tenants[0].monthly_budget_usd"));
     }
 
     #[test]
-    fn una_campo_ignoto_e_un_errore_e_non_un_typo_silenzioso() {
-        let toml = format!("{BASE}\nparola_inventata = 1\n");
-        let errori = from_toml(&toml).expect_err("campo sconosciuto");
-        assert!(errori[0].problem.contains("non è TOML valido"));
+    fn an_unknown_field_is_an_error_and_not_a_silent_typo() {
+        let toml = format!("{BASE}\nunknown_word = 1\n");
+        let errors = from_toml(&toml).expect_err("unknown field");
+        assert!(errors[0].problem.contains("not valid TOML"));
     }
 }

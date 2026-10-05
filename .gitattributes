@@ -1,4 +1,4 @@
-# normalizza in checkout, LF nel repo, niente fili di piattaforma
+# normalize on checkout, LF in the repo, no platform quirks
 * text=auto eol=lf
 
 *.png binary
@@ -8,7 +8,7 @@
 *.zip binary
 *.gz binary
 
-# lockfile mai da normalizzare
+# lockfiles never normalized
 *.lock -text
 package-lock.json -text
 composer.lock -text

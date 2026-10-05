@@ -1,15 +1,14 @@
-// Questo modulo è compilato due volte, una per ogni binario di test che lo include.
-// Ogni copia vede solo gli strumenti che il proprio test usa, e segnalerebbe gli
-// altri come morti. È un toolbox condiviso: la metà inutilizzata è normale.
+// This module is compiled twice, once per test binary that includes it.
+// Each copy sees only the tools its own test uses, and would flag the others as dead.
+// It is a shared toolbox: the unused half is normal.
 #![allow(dead_code)]
 
-//! Un provider finto, per testare il router senza rete.
+//! A fake provider, to test the router without a network.
 //!
-//! È qui che il progetto guadagna da `Upstream` essere un trait: l'intera politica di
-//! failover — le tre classi di errore, il tetto di tentativi, il divieto di
-//! ritentare una richiesta già partita — si verifica in microsecondi e senza che un
-//! provider di mezzo abbia cambiato risposta, che è il problema dei test che
-//! colpiscono un'API vera.
+//! This is where the project gains from `Upstream` being a trait: the whole failover
+//! policy — the three error classes, the attempt cap, the ban on retrying a request that
+//! already went out — is verified in microseconds and without a provider in between
+//! having changed its answer, which is the problem with tests that hit a real API.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,102 +18,98 @@ use llmgateway::upstream::{
     BoxFuture, TransportError, TransportKind, Upstream, UpstreamRequest, UpstreamResponse,
 };
 
-/// Cosa deve fare il provider finto.
+/// What the fake provider must do.
 #[derive(Debug, Clone)]
-pub enum Comportamento {
-    /// Risponde con questo status e questo corpo.
-    Risponde(u16, String),
-    /// Non produce risposta, e la richiesta **non è uscita**.
-    NonEsce(TransportKind),
-    /// Non produce risposta, e la richiesta **è partita**.
-    PartitaSenzaRisposta(TransportKind),
+pub enum Behavior {
+    /// Responds with this status and this body.
+    Responds(u16, String),
+    /// Produces no response, and the request **did not go out**.
+    NotSent(TransportKind),
+    /// Produces no response, and the request **did go out**.
+    SentWithoutResponse(TransportKind),
 }
 
-impl Comportamento {
-    /// Risponde `200` con un corpo JSON.
+impl Behavior {
+    /// Responds `200` with a JSON body.
     #[must_use]
-    pub fn ok(corpo: &str) -> Self {
-        Self::Risponde(200, corpo.to_owned())
+    pub fn ok(body: &str) -> Self {
+        Self::Responds(200, body.to_owned())
     }
 
-    /// Risponde `503`.
+    /// Responds `503`.
     #[must_use]
-    pub fn non_disponibile() -> Self {
-        Self::Risponde(503, "{\"error\":\"service unavailable\"}".to_owned())
+    pub fn unavailable() -> Self {
+        Self::Responds(503, "{\"error\":\"service unavailable\"}".to_owned())
     }
 }
 
-/// Un provider che fa esattamente quello che gli si dice, e conta quante volte.
+/// A provider that does exactly what it is told, and counts how many times.
 #[derive(Debug)]
-pub struct Finto {
-    nome: String,
-    modelli: Option<Vec<String>>,
-    comportamenti: Mutex<Vec<Comportamento>>,
-    chiamate: AtomicUsize,
-    ultimi_modelli: Mutex<Vec<String>>,
+pub struct Fake {
+    name: String,
+    models: Option<Vec<String>>,
+    behaviors: Mutex<Vec<Behavior>>,
+    calls: AtomicUsize,
+    last_models: Mutex<Vec<String>>,
 }
 
-impl Finto {
-    /// Un provider che risponde sempre `200` a qualunque modello.
+impl Fake {
+    /// A provider that always responds `200` to any model.
     #[must_use]
-    pub fn nuovo(nome: &str) -> Self {
+    pub fn new(name: &str) -> Self {
         Self {
-            nome: nome.to_owned(),
-            modelli: None,
-            comportamenti: Mutex::new(vec![Comportamento::ok("{\"ok\":true}")]),
-            chiamate: AtomicUsize::new(0),
-            ultimi_modelli: Mutex::new(Vec::new()),
+            name: name.to_owned(),
+            models: None,
+            behaviors: Mutex::new(vec![Behavior::ok("{\"ok\":true}")]),
+            calls: AtomicUsize::new(0),
+            last_models: Mutex::new(Vec::new()),
         }
     }
 
-    /// Un provider che serve solo questi modelli.
+    /// A provider that serves only these models.
     #[must_use]
-    pub fn con_modelli(nome: &str, modelli: &[&str]) -> Self {
-        let mut finto = Self::nuovo(nome);
-        finto.modelli = Some(modelli.iter().map(|m| (*m).to_owned()).collect());
-        finto
+    pub fn with_models(name: &str, models: &[&str]) -> Self {
+        let mut fake = Self::new(name);
+        fake.models = Some(models.iter().map(|m| (*m).to_owned()).collect());
+        fake
     }
 
-    /// Imposta gli atteggiamenti, uno per tentativo. L'ultimo vale per tutti i
-    /// tentativi successivi: un provider che risponde sempre `503` si scrive
-    /// con un solo elemento.
+    /// Sets the behaviors, one per attempt. The last one holds for all the following
+    /// attempts: a provider that always responds `503` is written with a single element.
     #[must_use]
-    pub fn con_comportamenti(self, comportamenti: Vec<Comportamento>) -> Self {
-        *self.comportamenti.lock().expect("lock dei comportamenti") = comportamenti;
+    pub fn with_behaviors(self, behaviors: Vec<Behavior>) -> Self {
+        *self.behaviors.lock().expect("behaviors lock") = behaviors;
         self
     }
 
-    /// Quante volte è stato chiamato.
+    /// How many times it was called.
     #[must_use]
-    pub fn chiamate(&self) -> usize {
-        self.chiamate.load(Ordering::SeqCst)
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
     }
 
-    /// I modelli che gli sono stati chiesti, in ordine.
+    /// The models it was asked for, in order.
     #[must_use]
-    pub fn modelli_richiesti(&self) -> Vec<String> {
-        self.ultimi_modelli
-            .lock()
-            .expect("lock dei modelli")
-            .clone()
+    pub fn requested_models(&self) -> Vec<String> {
+        self.last_models.lock().expect("models lock").clone()
     }
 
-    fn prossimo(&self) -> Comportamento {
-        let mut lista = self.comportamenti.lock().expect("lock dei comportamenti");
-        if lista.len() == 1 {
-            return lista[0].clone();
+    fn next(&self) -> Behavior {
+        let mut list = self.behaviors.lock().expect("behaviors lock");
+        if list.len() == 1 {
+            return list[0].clone();
         }
-        lista.remove(0)
+        list.remove(0)
     }
 }
 
-impl Upstream for Finto {
+impl Upstream for Fake {
     fn name(&self) -> &str {
-        &self.nome
+        &self.name
     }
 
     fn models(&self) -> Option<&[String]> {
-        self.modelli.as_deref()
+        self.models.as_deref()
     }
 
     fn send(
@@ -122,48 +117,46 @@ impl Upstream for Finto {
         request: UpstreamRequest,
         _timeout: Duration,
     ) -> BoxFuture<'_, Result<UpstreamResponse, TransportError>> {
-        self.chiamate.fetch_add(1, Ordering::SeqCst);
-        self.ultimi_modelli
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.last_models
             .lock()
-            .expect("lock dei modelli")
+            .expect("models lock")
             .push(request.model.clone());
 
-        // tutto ciò che il future usa viene **copiato**: il future vive più a lungo
-        // del prestito di `&self`, e tenere il riferimento qui dentro non compilerebbe
-        let comportamento = self.prossimo();
-        let nome = self.nome.clone();
+        // everything the future uses is **copied**: the future lives longer than the
+        // borrow of `&self`, and keeping the reference in there would not compile
+        let behavior = self.next();
+        let name = self.name.clone();
         let stream = request.stream;
 
         llmgateway::upstream::boxed(move || async move {
-            let nome = nome.as_str();
-            match comportamento {
-                Comportamento::Risponde(200, corpo) if stream => {
-                    // lo streaming arriva a pezzi: il gateway deve inoltrarlo senza
-                    // aspettare l'ultimo
-                    let chunk: Vec<Vec<u8>> = corpo
+            let name = name.as_str();
+            match behavior {
+                Behavior::Responds(200, body) if stream => {
+                    // streaming arrives in pieces: the gateway must forward it without
+                    // waiting for the last one
+                    let chunks: Vec<Vec<u8>> = body
                         .lines()
                         .map(|l| format!("data: {l}\n\n").into_bytes())
                         .collect();
-                    Ok(UpstreamResponse::streaming(200, chunk))
+                    Ok(UpstreamResponse::streaming(200, chunks))
                 }
-                Comportamento::Risponde(status, corpo) => {
-                    Ok(UpstreamResponse::buffered(status, corpo))
-                }
-                Comportamento::NonEsce(kind) => Err(TransportError::not_sent(
+                Behavior::Responds(status, body) => Ok(UpstreamResponse::buffered(status, body)),
+                Behavior::NotSent(kind) => Err(TransportError::not_sent(
                     kind,
-                    format!("{nome} non raggiungibile"),
+                    format!("{name} unreachable"),
                 )),
-                Comportamento::PartitaSenzaRisposta(kind) => Err(TransportError::maybe_sent(
+                Behavior::SentWithoutResponse(kind) => Err(TransportError::maybe_sent(
                     kind,
-                    format!("{nome} ha spento dopo aver ricevuto la richiesta"),
+                    format!("{name} died after receiving the request"),
                 )),
             }
         })
     }
 }
 
-/// Un provider condiviso, pronto per il router.
+/// A shared provider, ready for the router.
 #[must_use]
-pub fn condiviso(finto: Finto) -> Arc<dyn Upstream> {
-    Arc::new(finto)
+pub fn shared(fake: Fake) -> Arc<dyn Upstream> {
+    Arc::new(fake)
 }

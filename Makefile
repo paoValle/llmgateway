@@ -1,31 +1,31 @@
-# `cargo` è lo strumento nativo e basta: su Windows `make` spesso non esiste,
-# su GitHub Actions su Linux esiste. Il Makefile è qui per chi lo preferisce, e
-# non definisce un solo comando che `cargo` non abbia già.
+# `cargo` is the native tool and that is enough: on Windows `make` often does not
+# exist, on GitHub Actions on Linux it does. The Makefile is here for whoever prefers
+# it, and it does not define a single command `cargo` does not already have.
 .DEFAULT_GOAL := help
 .PHONY: help setup build test lint fmt fmt-check ci doc
 
-help: ## mostra questo aiuto
+help: ## show this help
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
 
-setup: ## scarica le dipendenze
+setup: ## fetch dependencies
 	cargo fetch --locked
 
-build: ## compila
+build: ## compile
 	cargo build
 
-test: ## suite completa
+test: ## full suite
 	cargo test --all-targets
 
-lint: ## clippy, i warning sono errori
+lint: ## clippy, warnings are errors
 	cargo clippy --all-targets --all-features -- -D warnings
 
-fmt: ## scrive i file
+fmt: ## writes the files
 	cargo fmt
 
-fmt-check: ## verifica la formattazione senza scrivere
+fmt-check: ## checks formatting without writing
 	cargo fmt --check
 
-doc: ## apre la documentazione
+doc: ## opens the documentation
 	cargo doc --open
 
-ci: fmt-check lint test ## esattamente quello che gira in CI
+ci: fmt-check lint test ## exactly what runs in CI

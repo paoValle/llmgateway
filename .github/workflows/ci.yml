@@ -9,7 +9,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # il toolchain lo dichiara rust-toolchain.toml: qui non si duplica il canale
+  # the toolchain is declared by rust-toolchain.toml: the channel is not duplicated here
   RUSTFLAGS: -D warnings
 
 jobs:
@@ -18,8 +18,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # lo stesso codice su due sistemi: su Linux è dove gira in produzione,
-        # macOS è dove scappa un test che dipende dalla localizzazione
+        # the same code on two systems: Linux is where it runs in production,
+        # macOS is where a test that depends on the locale slips through
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
@@ -37,8 +37,8 @@ jobs:
       - run: cargo test --all-targets
       - run: cargo test --doc
 
-  # il lockfile è ciò che rende la build riproducibile: se le dipendenze si
-  # risolvono diversamente da un commit all'altro, la CI verde non dice niente
+  # the lockfile is what makes the build reproducible: if dependencies resolve
+  # differently from one commit to the next, a green CI says nothing
   lockfile:
     runs-on: ubuntu-latest
     steps:

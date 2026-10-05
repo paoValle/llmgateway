@@ -1,86 +1,86 @@
-//! Il denaro: micro-dollari interi, prezzi per modello, costo di una richiesta.
+//! Money: integer micro-dollars, prices per model, the cost of a request.
 //!
-//! Le stesse regole di `agentloop`, per lo stesso motivo: `0.1 + 0.2 !== 0.3`, e su
-//! un fatturato la differenza è un buco. Nessun `f64` attraversa questo modulo.
+//! The same rules as `agentloop`, for the same reason: `0.1 + 0.2 !== 0.3`, and on an
+//! invoice the difference is a hole. No `f64` crosses this module.
 //!
-//! Qui non c'è prenotazione: quella sta in [`crate::budget`], che è dove vivono i
-//! tenant. Questo modulo sa solo trasformare token in denaro.
+//! There is no reservation here: that lives in [`crate::budget`], which is where the
+//! tenants are. This module only knows how to turn tokens into money.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Un importo in micro-dollari. Intero, mai `f64`.
+/// An amount in micro-dollars. Integer, never `f64`.
 ///
-/// `1 USD = 1 000 000 µUSD`. La granularità di un micro-dollaro è di gran lunga più
-/// fine di quella di qualsiasi listino, e un tetto espresso in interi non può
-/// accumulare errore di arrotondamento nel tempo.
+/// `1 USD = 1 000 000 µUSD`. The granularity of a micro-dollar is far finer than that
+/// of any price list, and a cap expressed in integers cannot accumulate rounding error
+/// over time.
 pub type MicroUsd = u64;
 
-/// Un dollaro, in micro-dollari.
+/// One dollar, in micro-dollars.
 #[must_use]
 pub fn usd(amount: f64) -> Option<MicroUsd> {
     if !amount.is_finite() || amount < 0.0 {
         return None;
     }
-    // `round` invece di un troncamento: 0.9999999999999999 diventerebbe 0, e un
-    // prezzo che diventa zero per arrotondamento è un prezzo che non c'è.
-    #[allow(clippy::cast_sign_loss)] // il segno è già escluso dai controlli sopra
+    // `round` instead of truncation: 0.9999999999999999 would become 0, and a price
+    // that becomes zero through rounding is a price that does not exist.
+    #[allow(clippy::cast_sign_loss)] // the sign is already excluded by the checks above
     Some((amount * 1_000_000.0).round() as MicroUsd)
 }
 
-/// Un importo già espresso in micro-dollari.
+/// An amount already expressed in micro-dollars.
 ///
-/// È il fratello Rust di [`usd`]: serve dove il valore è già noto e non viene da un
-/// listino scritto a mano, e dove passarlo da `f64` aggiungerebbe un errore solo.
+/// It is the Rust sibling of [`usd`]: needed where the value is already known and does
+/// not come from a hand-written price list, and where passing it through `f64` would
+/// only add an error.
 #[must_use]
 pub const fn micros(amount: u64) -> MicroUsd {
     amount
 }
 
-/// Prezzi di un modello, in micro-dollari per **milione** di token.
+/// Prices of a model, in micro-dollars per **million** tokens.
 ///
-/// Unità comoda perché è quella con cui i provider pubblicano i listini: non
-/// importa se un token costa 0,15 `µUSD` o 15 `µUSD`.
+/// A convenient unit because it is the one providers publish price lists in: it does
+/// not matter whether a token costs 0.15 `µUSD` or 15 `µUSD`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Price {
-    /// Per milione di token di input.
+    /// Per million input tokens.
     pub input: MicroUsd,
-    /// Per milione di token di output.
+    /// Per million output tokens.
     pub output: MicroUsd,
 }
 
 impl Price {
-    /// Un prezzo di zero. Serve solo per "prezzo sconosciuto, non conteggiare".
+    /// A price of zero. Only used for "unknown price, do not count".
     pub const ZERO: Self = Self {
         input: 0,
         output: 0,
     };
 
-    /// Quanto costa una richiesta che consuma questi token.
+    /// What a request consuming these tokens costs.
     ///
-    /// Aritmetica intera, arrotondamento **per eccesso**. Un errore di un
-    /// micro-dollaro a favore del sistema costa meno di una fattura che nessuno
-    /// riesce a spiegare: la somma di tanti arrotondamenti per difetto, su un
-    /// volume alto, è la differenza fra una previsione e una sorpresa.
+    /// Integer arithmetic, rounding **up**. A one micro-dollar error in the system's
+    /// favor costs less than an invoice nobody can explain: the sum of many roundings
+    /// down, at high volume, is the difference between a forecast and a surprise.
     ///
-    /// Il sovraccarico qui dentro è saturante, non va in panic: con prezzi e
-    /// conteggi al massimo, `token × prezzo` in `u64` trabocca, e un gateway che
-    /// entra in panic mentre calcola un conto non deve accadere.
+    /// The arithmetic in here saturates, it does not panic: with maximum prices and
+    /// counts, `tokens × price` overflows `u64`, and a gateway that panics while
+    /// computing a bill must not happen.
     #[must_use]
     pub fn cost(&self, input_tokens: u64, output_tokens: u64) -> MicroUsd {
         let input = u128::from(input_tokens).saturating_mul(u128::from(self.input));
         let output = u128::from(output_tokens).saturating_mul(u128::from(self.output));
-        // somma in u128: con u64 il prodotto token × prezzo trabocca su un modello
-        // costoso e una risposta lunga
+        // sum in u128: with u64 the product tokens × price overflows on an expensive
+        // model and a long response
         div_ceil(input.saturating_add(output), 1_000_000)
     }
 
-    /// Il prezzo massimo fra due, componente per componente.
+    /// The maximum price of the two, component by component.
     ///
-    /// Serve al fallback per i modelli sconosciuti: valutarli al prezzo più alto
-    /// noto significa "ipotizziamo il peggio", che è l'unica ipotesi sensata per
-    /// un tetto di spesa.
+    /// Used for the fallback on unknown models: valuing them at the highest known price
+    /// means "we assume the worst", which is the only sensible assumption for a
+    /// spending cap.
     #[must_use]
     pub fn max_componentwise(self, other: Self) -> Self {
         Self {
@@ -90,88 +90,88 @@ impl Price {
     }
 }
 
-/// Divisione intera per eccesso. `div_ceil` è stabile dalla 1.73, ma il progetto
-/// dichiara `rust-version = 1.80`: la si scrive qui per non dipendere da un
-/// dettaglio della versione in un posto dove l'aritmetica è il punto.
+/// Integer division rounded up. `div_ceil` has been stable since 1.73, but the project
+/// declares `rust-version = 1.80`: it is written here so as not to depend on a version
+/// detail in a place where the arithmetic is the point.
 fn div_ceil(numerator: u128, denominator: u128) -> MicroUsd {
     numerator.div_ceil(denominator).min(u128::from(u64::MAX)) as MicroUsd
 }
 
-/// I prezzi per modello.
+/// The prices per model.
 #[derive(Debug, Clone, Default)]
 pub struct PriceTable {
     prices: BTreeMap<String, Price>,
-    /// Il prezzo più alto noto: il fallback per i modelli che non ci sono.
+    /// The highest known price: the fallback for models that are not there.
     worst: Option<Price>,
 }
 
 impl PriceTable {
-    /// Costruisce da una mappa modello → prezzo.
+    /// Builds from a model → price map.
     #[must_use]
     pub fn new(prices: BTreeMap<String, Price>) -> Self {
         let worst = prices.values().copied().reduce(Price::max_componentwise);
         Self { prices, worst }
     }
 
-    /// Vuota: ogni modello sconosciuto costa zero, e ogni costo è zero.
+    /// Empty: every unknown model costs zero, and every cost is zero.
     ///
-    /// Esiste per i test e per un gateway senza listini. **In produzione una tabella
-    /// vuota è un errore di configurazione**, e `Config::validate` lo segnala.
+    /// It exists for tests and for a gateway with no price lists. **In production an
+    /// empty table is a configuration error**, and `Config::validate` reports it.
     #[must_use]
     pub fn empty() -> Self {
         Self::default()
     }
 
-    /// Il prezzo dichiarato di un modello, se c'è.
+    /// The declared price of a model, if there is one.
     #[must_use]
     pub fn get(&self, model: &str) -> Option<Price> {
         self.prices.get(model).copied()
     }
 
-    /// Il prezzo da usare per un modello: dichiarato, o il peggiore noto.
+    /// The price to use for a model: declared, or the worst known one.
     ///
-    /// Il fallback pessimistico è deliberato: un modello nuovo che entra in
-    /// produzione è il momento esatto in cui un prezzo a zero farebbe sembrare che
-    /// il budget protegga mentre non protegge niente.
+    /// The pessimistic fallback is deliberate: a new model entering production is
+    /// exactly the moment when a zero price would make the budget look like it protects
+    /// something while it protects nothing.
     #[must_use]
     pub fn resolve(&self, model: &str) -> Price {
         self.get(model).or(self.worst).unwrap_or(Price::ZERO)
     }
 
-    /// `true` se il modello ha un prezzo dichiarato.
+    /// `true` if the model has a declared price.
     ///
-    /// Serve al logging per distinguere "prezzo reale" da "stima pessimista".
+    /// Used by logging to distinguish "real price" from "pessimistic estimate".
     #[must_use]
     pub fn knows(&self, model: &str) -> bool {
         self.prices.contains_key(model)
     }
 
-    /// Quanti modelli hanno un prezzo dichiarato.
+    /// How many models have a declared price.
     #[must_use]
     pub fn len(&self) -> usize {
         self.prices.len()
     }
 
-    /// `true` se nessun modello ha un prezzo.
+    /// `true` if no model has a price.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.prices.is_empty()
     }
 }
 
-/// Token consumati da una richiesta, come li riporta il provider.
+/// Tokens consumed by a request, as reported by the provider.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
-    /// Token di input (prompt).
+    /// Input tokens (prompt).
     #[serde(default)]
     pub input_tokens: u64,
-    /// Token di output (completamento).
+    /// Output tokens (completion).
     #[serde(default)]
     pub output_tokens: u64,
 }
 
 impl Usage {
-    /// Costo di questi token al prezzo dato.
+    /// Cost of these tokens at the given price.
     #[must_use]
     pub fn cost(&self, price: Price) -> MicroUsd {
         price.cost(self.input_tokens, self.output_tokens)
@@ -182,17 +182,17 @@ impl Usage {
 mod tests {
     use super::*;
 
-    fn tabella() -> PriceTable {
+    fn table() -> PriceTable {
         let mut m = BTreeMap::new();
         m.insert(
-            "economico".to_owned(),
+            "cheap".to_owned(),
             Price {
                 input: 150,
                 output: 600,
             },
         );
         m.insert(
-            "costoso".to_owned(),
+            "expensive".to_owned(),
             Price {
                 input: 2_500,
                 output: 10_000,
@@ -202,92 +202,90 @@ mod tests {
     }
 
     #[test]
-    fn un_dollaro_sono_un_milione_di_micro_dollari() {
+    fn one_dollar_is_a_million_micro_dollars() {
         assert_eq!(usd(1.0), Some(1_000_000));
         assert_eq!(usd(0.25), Some(250_000));
         assert_eq!(usd(0.0), Some(0));
     }
 
     #[test]
-    fn i_micro_dollari_sono_interi_e_non_passano_dai_float() {
-        // da qui in poi nel progetto non c'è più nessun f64 che tocchi un prezzo
+    fn micro_dollars_are_integers_and_do_not_pass_through_floats() {
+        // from here on there is no f64 left in the project that touches a price
         assert_eq!(micros(150), 150);
         assert_eq!(micros(1_000_000), usd(1.0).expect("1 USD"));
     }
 
     #[test]
-    fn un_prezzo_negativo_o_non_finito_non_e_un_prezzo() {
+    fn a_negative_or_non_finite_price_is_not_a_price() {
         assert_eq!(usd(-1.0), None);
         assert_eq!(usd(f64::NAN), None);
         assert_eq!(usd(f64::INFINITY), None);
     }
 
     #[test]
-    fn il_costo_si_calcola_sul_listino_per_milione() {
+    fn the_cost_is_computed_on_the_price_list_per_million() {
         let p = Price {
             input: 3,
             output: 15,
         };
-        // 1M + 1M token = 3 + 15 µUSD
+        // 1M + 1M tokens = 3 + 15 µUSD
         assert_eq!(p.cost(1_000_000, 1_000_000), 18);
         assert_eq!(p.cost(0, 0), 0);
     }
 
     #[test]
-    fn il_costo_arrotonda_per_eccesso_mai_per_difetto() {
+    fn the_cost_rounds_up_never_down() {
         let p = Price {
             input: 3,
             output: 15,
         };
-        // 1 token da 3 µUSD/M = 0,000003 µUSD: deve valere 1, non 0
+        // 1 token at 3 µUSD/M = 0.000003 µUSD: it must be worth 1, not 0
         assert_eq!(p.cost(1, 0), 1);
         assert_eq!(p.cost(0, 1), 1);
         assert_eq!(p.cost(1, 1), 1);
     }
 
-    /// Prezzo realistico: 3 `µUSD` per milione di token è un listino che non esiste.
-    const PREZZO: Price = Price {
+    /// A realistic price: 3 `µUSD` per million tokens is a price list that does not exist.
+    const PRICE: Price = Price {
         input: 150,
         output: 600,
     };
-    const RICHIESTE: u64 = 1_000;
-    const TOKEN_PER_RICHIESTA: u64 = 1_000;
+    const REQUESTS: u64 = 1_000;
+    const TOKENS_PER_REQUEST: u64 = 1_000;
 
     #[test]
-    fn la_somma_di_tante_richieste_mai_sotto_conta_il_costo_reale() {
-        let p = PREZZO;
-        let conteggiato: MicroUsd = (0..RICHIESTE)
-            .map(|_| p.cost(TOKEN_PER_RICHIESTA, 500))
-            .sum();
-        // il vero costo, arrotondato una volta sola su tutto
-        let vero = p.cost(TOKEN_PER_RICHIESTA * RICHIESTE, 500 * RICHIESTE);
+    fn summing_many_requests_is_never_under_the_real_cost() {
+        let p = PRICE;
+        let counted: MicroUsd = (0..REQUESTS).map(|_| p.cost(TOKENS_PER_REQUEST, 500)).sum();
+        // the real cost, rounded only once over everything
+        let real = p.cost(TOKENS_PER_REQUEST * REQUESTS, 500 * REQUESTS);
 
         assert!(
-            conteggiato >= vero,
-            "mai sotto: {conteggiato} < {vero} — il tetto non protegge più"
+            counted >= real,
+            "never under: {counted} < {real} — the cap no longer protects"
         );
-        // e di quanto sbaglia: al più un micro-dollaro a richiesta, per l'arrotondamento
-        let eccesso = conteggiato - vero;
+        // and by how much it is wrong: at most one micro-dollar per request, for rounding
+        let excess = counted - real;
         assert!(
-            eccesso <= RICHIESTE,
-            "sovrastima di {eccesso} su {RICHIESTE} richieste: più di 1 µUSD a richiesta"
+            excess <= REQUESTS,
+            "overestimate of {excess} over {REQUESTS} requests: more than 1 µUSD per request"
         );
     }
 
     #[test]
-    fn un_prodotto_overflow_non_panorama() {
-        // token × prezzo in u64 non ci sta, e nemmeno la somma dei due in u128:
-        // il risultato deve essere un numero, non un panic
+    fn an_overflowing_product_does_not_panic() {
+        // tokens × price does not fit in u64, and neither does the sum of the two in
+        // u128: the result must be a number, not a panic
         let p = Price {
             input: u64::MAX,
             output: u64::MAX,
         };
-        let costo = p.cost(u64::MAX, u64::MAX);
-        assert_eq!(costo, u64::MAX);
+        let cost = p.cost(u64::MAX, u64::MAX);
+        assert_eq!(cost, u64::MAX);
     }
 
     #[test]
-    fn il_max_componentwise_tiene_il_peggior_lato() {
+    fn max_componentwise_keeps_the_worst_side() {
         let a = Price {
             input: 100,
             output: 5_000,
@@ -307,31 +305,31 @@ mod tests {
     }
 
     #[test]
-    fn un_modello_conosciuto_ha_il_suo_prezzo() {
-        assert_eq!(tabella().resolve("costoso").input, 2_500);
-        assert!(tabella().knows("costoso"));
+    fn a_known_model_has_its_own_price() {
+        assert_eq!(table().resolve("expensive").input, 2_500);
+        assert!(table().knows("expensive"));
     }
 
     #[test]
-    fn un_modello_sconosciuto_vale_il_prezzo_piu_alto_che_conosciamo() {
-        let prezzo = tabella().resolve("modello-del-futuro");
-        // non zero: prezzo zero significa "il budget protegge" e non è vero
-        assert_eq!(prezzo.input, 2_500);
-        assert_eq!(prezzo.output, 10_000);
-        assert!(!tabella().knows("modello-del-futuro"));
+    fn an_unknown_model_is_worth_the_highest_price_we_know() {
+        let price = table().resolve("model-of-the-future");
+        // not zero: a zero price means "the budget protects" and that is not true
+        assert_eq!(price.input, 2_500);
+        assert_eq!(price.output, 10_000);
+        assert!(!table().knows("model-of-the-future"));
     }
 
     #[test]
-    fn una_tabella_vuota_da_zero_e_lo_dice() {
+    fn an_empty_table_gives_zero_and_says_so() {
         assert!(PriceTable::empty().is_empty());
-        assert_eq!(PriceTable::empty().resolve("qualsiasi"), Price::ZERO);
+        assert_eq!(PriceTable::empty().resolve("any"), Price::ZERO);
     }
 
     #[test]
-    fn il_usage_si_deserializza_dal_formato_del_provider() {
-        // il campo si chiama prompt_tokens upstream: la rinomina è compito dell'adapter
+    fn usage_deserializes_from_the_provider_format() {
+        // the field is called prompt_tokens upstream: renaming it is the adapter's job
         let json = r#"{"input_tokens":120,"output_tokens":40}"#;
-        let u: Usage = serde_json::from_str(json).expect("usage valido");
+        let u: Usage = serde_json::from_str(json).expect("valid usage");
         assert_eq!(
             u,
             Usage {

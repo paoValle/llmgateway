@@ -1,27 +1,27 @@
 ---
 name: Bug
-about: Qualcosa non torna
+about: Something is off
 labels: bug
 ---
 
-## Sintomo
+## Symptom
 
-Cosa ti aspettavi, cosa hai ottenuto.
+What you expected, what you got.
 
-## Riproduzione
+## Reproduction
 
-Il caso minimo, più corto possibile. Se serve un comando, mettilo in un blocco.
+The minimal case, as short as possible. If a command is needed, put it in a block.
 
 ```
-$ comando --flag
+$ command --flag
 ```
 
-## Ambiente
+## Environment
 
-- versione:
+- version:
 - OS:
-- (se serve) modelo/API coinvolto, senza chiavi: nomi fittizi vanno bene
+- (if needed) model/API involved, without keys: made-up names are fine
 
 ## Extra
 
-Log, screenshot, cosa hai già provato a escludere.
+Logs, screenshots, what you already tried to rule out.

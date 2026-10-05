@@ -1,19 +1,19 @@
 ---
-name: Proposta
-about: "Quello che vorrei costruire (o che vorrei capire)"
+name: Proposal
+about: "What I would like to build (or would like to understand)"
 labels: enhancement
 ---
 
-## Problema
+## Problem
 
-Cinque righe. Qualcuno che non conosce il progetto deve capire il *problema*,
-non la soluzione.
+Five lines. Someone who does not know the project must understand the *problem*,
+not the solution.
 
-## Proposta
+## Proposal
 
-Il minimo che risolve. Se la lista dei requisiti supera mezza pagina, il problema
-non è ancora capito.
+The minimum that solves it. If the list of requirements exceeds half a page, the problem
+is not understood yet.
 
-## Alternative scartate
+## Rejected alternatives
 
-Una riga ciascuna, con il motivo. È la parte che vale di più in una review.
+One line each, with the reason. It is the part worth the most in a review.

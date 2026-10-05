@@ -4,9 +4,9 @@ updates:
     directory: /
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
-    # Idem: le minor si mergiano se la CI è verde, le major sono una decisione.
-    # In Rust è ancora più vero: un cambio di major spesso tocca gli `unsafe` e le
-    # feature, e un PR automatico che lo fa da solo è un PR che nessuno guarda.
+    # Same: minors are merged if CI is green, majors are a decision.
+    # In Rust that is even more true: a major change often touches `unsafe` and
+    # features, and an automatic PR that does it on its own is a PR nobody looks at.
     ignore:
       - dependency-name: '*'
         update-types: ['version-update:semver-major']

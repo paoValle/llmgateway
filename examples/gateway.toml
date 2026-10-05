@@ -1,46 +1,45 @@
-# Configurazione di esempio. Copiala e adattala.
+# Example configuration. Copy it and adapt it.
 #
-# Nota su cosa c'è e cosa non c'è: **nessun segreto in questo file.** Le chiavi si
-# prendono dall'ambiente, e qui sotto c'è solo il nome della variabile da cui
-# leggerle. Questo file è quindi committabile, e un diff su di esso non può
-# far trapelare una chiave.
+# A note on what is here and what is not: **no secrets in this file.** Keys are taken
+# from the environment, and below there is only the name of the variable to read them
+# from. This file is therefore committable, and a diff on it cannot leak a key.
 
 [server]
 bind = "127.0.0.1:8080"
 request_timeout_ms = 60_000
-# Tetto di tentativi su tutti i provider insieme. Il failover senza tetto è un
-# attacco che si autoalimenta.
+# Attempt cap across all providers together. Failover without a cap is a
+# self-feeding attack.
 max_attempts = 4
-# 1 = metriche esatte. Sopra 1 si contano 1 richiesta ogni N.
+# 1 = exact metrics. Above 1, one request in N is counted.
 metrics_sample_rate = 100
 
-# --- provider, in ordine di preferenza ---
-# La priorità deve essere univoca: due provider con la stessa priorità rendono
-# il failover non deterministico, e la configurazione viene rifiutata.
+# --- providers, in order of preference ---
+# The priority must be unique: two providers with the same priority make failover
+# non-deterministic, and the configuration is rejected.
 
 [[providers]]
-name = "primario"
+name = "primary"
 base_url = "https://api.openai.com/v1"
-api_key_env = "PRIMARIO_API_KEY"
+api_key_env = "PRIMARY_API_KEY"
 priority = 1
 
 [[providers]]
-name = "secondario"
+name = "secondary"
 base_url = "https://api-fallback.example.com/v1"
-api_key_env = "SECONDARIO_API_KEY"
+api_key_env = "SECONDARY_API_KEY"
 priority = 2
 
-# --- prezzi: dollari per milione di token ---
-# Un modello non elencato viene valutato al prezzo più alto che si conosce, mai a
-# zero: prezzo zero significa "il tetto protegge" mentre non protegge niente.
+# --- prices: dollars per million tokens ---
+# A model that is not listed is valued at the highest price known, never at zero:
+# a zero price means "the cap protects" while it protects nothing.
 
 [pricing]
 "gpt-4o-mini" = { input = 0.15, output = 0.60 }
 "gpt-4o"      = { input = 2.50, output = 10.00 }
 
-# --- tenant ---
-# `models` è facoltativo. Se lo metti, il tenant non può usarne altri: è un
-# vincolo che vale quanto il tetto, e va pensato.
+# --- tenants ---
+# `models` is optional. If you set it, the tenant cannot use any others: it is a
+# constraint that weighs as much as the cap, and it must be thought through.
 
 [[tenants]]
 id = "acme"

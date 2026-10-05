@@ -1,20 +1,21 @@
-//! Il router: sceglie il provider e applica il failover.
+//! The router: it picks the provider and applies failover.
 //!
-//! Tutta la politica sta qui e **non sa nulla di HTTP**: `Upstream` è un trait,
-//! `TransportError` è un enum. È la conseguenza diretta di ADR 0001 e di ADR 0003 —
-//! le regole che decidono sono regole economiche e di dominio, quindi il posto dove
-//! stanno non ha niente a che fare con il trasporto.
+//! All the policy is here and it **knows nothing about HTTP**: `Upstream` is a trait,
+//! `TransportError` is an enum. It is the direct consequence of ADR 0001 and ADR 0003 —
+//! the rules that decide are economic and domain rules, so the place where they live has
+//! nothing to do with transport.
 //!
-//! L'algoritmo, in una riga per tentativo:
+//! The algorithm, in one line per attempt:
 //!
-//! - il provider **non serve** il modello → **saltato**, non è un errore;
-//! - la risposta è un successo → restituita, con il nome di chi l'ha servita;
-//! - l'errore è **del client** o **sconosciuto** → restituito subito, nessun failover;
-//! - l'errore è **del provider** o di trasporto → al successivo, se ne resta e se
-//!   ritentare è sicuro.
+//! - the provider **does not serve** the model → **skipped**, it is not an error;
+//! - the response is a success → returned, with the name of who served it;
+//! - the error is the **client's** or **unknown** → returned immediately, no failover;
+//! - the error is the **provider's** or a transport one → on to the next, if any are
+//!   left and if retrying is safe.
 //!
-//! Quell'ultimo "se ritentare è sicuro" è [`Upstream::Delivery`]: una richiesta partita
-//! e di esito ignoto non si ritenta, perché un doppio addebito costa più di un errore.
+//! That last "if retrying is safe" is [`Upstream::Delivery`]: a request that got out
+//! with an unknown outcome is not retried, because a double charge costs more than an
+//! error.
 
 use std::time::Duration;
 
@@ -25,65 +26,64 @@ use crate::upstream::{
     Upstream, UpstreamRequest, UpstreamResponse,
 };
 
-/// Tetto di tentativi su tutti i provider, se il chiamante non lo specifica.
+/// Cap on attempts across all providers, if the caller does not specify one.
 ///
-/// Il failover senza tetto è un attacco che si autoalimenta: quando i provider sono
-/// lenti l'uno con l'altro, ogni tentativo aggiunge carico proprio quando ce n'è
-/// già troppo.
+/// Failover without a cap is a self-feeding attack: when the providers are slow for one
+/// another, every attempt adds load exactly when there is already too much.
 pub const DEFAULT_MAX_ATTEMPTS: usize = 4;
 
-/// Perché il router non ha potuto servire la richiesta.
+/// Why the router could not serve the request.
 #[derive(Debug)]
 pub enum RouteError {
-    /// Nessun provider dichiara di servire il modello richiesto.
+    /// No provider claims to serve the requested model.
     NoProviderForModel {
-        /// Il modello richiesto.
+        /// The requested model.
         model: String,
-        /// I modelli che i provider disponibili servono davvero.
-        servibili: Vec<String>,
+        /// The models the available providers really serve.
+        available: Vec<String>,
     },
-    /// Non c'è nessun provider configurato.
+    /// There is no configured provider.
     NoProviders,
-    /// Un provider ha risposto con un errore **del client**: si restituisce com'è.
+    /// A provider answered with a **client** error: it is returned as it is.
     ClientFault {
-        /// Chi ha risposto.
+        /// Who answered.
         provider: String,
-        /// Lo stato.
+        /// The status.
         status: u16,
-        /// Il corpo della risposta, per inoltrarlo.
+        /// The response body, to forward it.
         body: Vec<u8>,
     },
-    /// Tutti i provider hanno risposto "non posso", o l'ultimo tentativo è finito
-    /// così. **Non** è un errore del client e non è lo status di un provider
-    /// singolo: è il fatto che il gateway, nel suo complesso, non ha potuto
-    /// servire. Va detto come `502`, non inoltrando lo status del provider.
+    /// All providers answered "I cannot", or the last attempt ended that way. It is
+    /// **not** a client error and it is not the status of a single provider: it is the
+    /// fact that the gateway, as a whole, could not serve. It must be reported as `502`,
+    /// not by forwarding the provider's status.
     ProviderUnavailable {
-        /// L'ultimo provider che ha risposto.
+        /// The last provider that answered.
         provider: String,
-        /// Lo status che ha dato.
+        /// The status it gave.
         status: u16,
     },
-    /// Un provider ha risposto con uno status che il gateway non sa classificare.
+    /// A provider answered with a status the gateway cannot classify.
     UnknownStatus {
-        /// Chi ha risposto.
+        /// Who answered.
         provider: String,
-        /// Lo stato.
+        /// The status.
         status: u16,
-        /// Il corpo, per inoltrarlo.
+        /// The body, to forward it.
         body: Vec<u8>,
     },
-    /// La chiamata è fallita e la richiesta era già partita: **non** si ritenta.
+    /// The call failed and the request had already gone out: it is **not** retried.
     DeliveryUnknown {
-        /// Il provider che non ha saputo.
+        /// The provider that could not do it.
         provider: String,
-        /// L'errore.
+        /// The error.
         error: TransportError,
     },
-    /// Tutti i tentativi sono finiti.
+    /// All attempts ran out.
     Exhausted {
-        /// Quanti tentativi sono stati fatti.
+        /// How many attempts were made.
         attempts: usize,
-        /// L'ultimo errore incontrato, per il messaggio al client.
+        /// The last error encountered, for the message to the client.
         last: Box<RouteError>,
     },
 }
@@ -91,45 +91,45 @@ pub enum RouteError {
 impl std::fmt::Display for RouteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoProviderForModel { model, servibili } => write!(
+            Self::NoProviderForModel { model, available } => write!(
                 f,
-                "nessun provider serve il modello {model:?}; disponibili: {}",
-                if servibili.is_empty() { "(nessuno)".to_owned() } else { servibili.join(", ") }
+                "no provider serves model {model:?}; available: {}",
+                if available.is_empty() { "(none)".to_owned() } else { available.join(", ") }
             ),
-            Self::NoProviders => f.write_str("nessun provider configurato"),
+            Self::NoProviders => f.write_str("no configured provider"),
             Self::ClientFault { provider, status, .. } => {
-                write!(f, "{provider} ha respinto la richiesta ({status}): errore del cliente, non si ritenta")
+                write!(f, "{provider} rejected the request ({status}): client error, it is not retried")
             }
             Self::ProviderUnavailable { provider, status, .. } => write!(
                 f,
-                "nessun provider ha potuto servire la richiesta (ultimo: {provider}, {status})"
+                "no provider could serve the request (last: {provider}, {status})"
             ),
             Self::UnknownStatus { provider, status, .. } => write!(
                 f,
-                "{provider} ha risposto {status}, uno stato che il gateway non sa classificare: non si ritenta"
+                "{provider} answered {status}, a status the gateway cannot classify: it is not retried"
             ),
             Self::DeliveryUnknown { provider, error } => write!(
                 f,
-                "{provider}: {error} — la richiesta era già partita, non si ritenta per evitare un doppio addebito"
+                "{provider}: {error} — the request had already gone out, it is not retried to avoid a double charge"
             ),
-            Self::Exhausted { attempts, last } => write!(f, "{attempts} tentativi esauriti ({last})"),
+            Self::Exhausted { attempts, last } => write!(f, "{attempts} attempts exhausted ({last})"),
         }
     }
 }
 
 impl std::error::Error for RouteError {}
 
-/// Una risposta servita, con il nome di chi l'ha servita.
+/// A served response, with the name of who served it.
 #[derive(Debug)]
 pub struct Routed {
-    /// Chi ha risposto.
+    /// Who answered.
     pub provider: String,
-    /// Quanti tentativi sono serviti prima.
+    /// How many attempts it took.
     pub attempts: usize,
-    /// La risposta.
+    /// The response.
     pub response: UpstreamResponse,
 }
-/// Il router.
+/// The router.
 #[derive(Clone)]
 pub struct Router {
     providers: Vec<SharedUpstream>,
@@ -137,9 +137,9 @@ pub struct Router {
     timeout: Duration,
 }
 
-/// `Debug` a mano: i provider sono trait object, e un `{:?}` che ne stampasse le
-/// internals finirebbe dentro un log. Qui si vede **quali** provider e con che
-/// tetto, che è la domanda che si fa durante un incidente.
+/// `Debug` by hand: the providers are trait objects, and a `{:?}` printing their
+/// internals would end up in a log. Here what is visible is **which** providers and with
+/// what cap, which is the question asked during an incident.
 impl std::fmt::Debug for Router {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Router")
@@ -154,8 +154,8 @@ impl std::fmt::Debug for Router {
 }
 
 impl Router {
-    /// Crea un router. `max_attempts` a zero diventa [`DEFAULT_MAX_ATTEMPTS`]:
-    /// un tetto di zero non è "nessun tentativo", è un gateway che non serve nessuno.
+    /// Creates a router. `max_attempts` of zero becomes [`DEFAULT_MAX_ATTEMPTS`]: a cap of
+    /// zero is not "no attempt", it is a gateway that serves nobody.
     #[must_use]
     pub fn new(providers: Vec<SharedUpstream>, max_attempts: usize, timeout: Duration) -> Self {
         Self {
@@ -169,181 +169,182 @@ impl Router {
         }
     }
 
-    /// I provider, in ordine di preferenza.
+    /// The providers, in order of preference.
     #[must_use]
     pub fn providers(&self) -> &[SharedUpstream] {
         &self.providers
     }
 
-    /// Il tetto di tentativi.
+    /// The cap on attempts.
     #[must_use]
     pub fn max_attempts(&self) -> usize {
         self.max_attempts
     }
 
-    /// I modelli dichiarati da qualche provider, per un messaggio di errore utile.
+    /// The models declared by some provider, for a useful error message.
     ///
-    /// Un provider che serve **tutti** i modelli non compare: nell'errore "nessuno
-    /// serve questo modello" ciò che serve è la lista di quelli **non** disponibili,
-    /// e un "tutti i modelli" non aggiunge niente.
+    /// A provider that serves **all** models does not appear: in the error "nobody serves
+    /// this model" what is needed is the list of the models that are **not** available,
+    /// and an "all models" adds nothing.
     #[must_use]
     pub fn servable_models(&self) -> Vec<String> {
-        let mut tutti: Vec<String> = self
+        let mut all: Vec<String> = self
             .providers
             .iter()
             .filter_map(|p| p.models())
             .flatten()
             .cloned()
             .collect();
-        tutti.sort();
-        tutti.dedup();
-        tutti
+        all.sort();
+        all.dedup();
+        all
     }
 
-    /// Invia la richiesta, con failover.
+    /// Sends the request, with failover.
     pub async fn route(&self, request: UpstreamRequest) -> Result<Routed, RouteError> {
         if self.providers.is_empty() {
             return Err(RouteError::NoProviders);
         }
 
-        let candidati: Vec<&SharedUpstream> = self
+        let candidates: Vec<&SharedUpstream> = self
             .providers
             .iter()
             .filter(|p| p.supports(&request.model))
             .collect();
 
-        if candidati.is_empty() {
+        if candidates.is_empty() {
             return Err(RouteError::NoProviderForModel {
                 model: request.model.clone(),
-                servibili: self.servable_models(),
+                available: self.servable_models(),
             });
         }
 
-        let mut tentativi = 0usize;
-        let mut ultimo: Option<RouteError> = None;
+        let mut attempts = 0usize;
+        let mut last: Option<RouteError> = None;
 
-        for provider in candidati {
-            if tentativi >= self.max_attempts {
-                debug!(attempts = tentativi, "tetto di tentativi raggiunto");
+        for provider in candidates {
+            if attempts >= self.max_attempts {
+                debug!(attempts, "attempt cap reached");
                 break;
             }
 
-            tentativi += 1;
+            attempts += 1;
             match self.attempt(provider.as_ref(), &request).await {
                 Attempt::Served(response) => {
                     return Ok(Routed {
                         provider: provider.name().to_owned(),
-                        attempts: tentativi,
+                        attempts,
                         response,
                     });
                 }
-                Attempt::Proseguire(errore) => ultimo = Some(errore),
-                Attempt::Fermarsi(errore) => return Err(errore),
+                Attempt::Continue(error) => last = Some(error),
+                Attempt::Stop(error) => return Err(error),
             }
         }
 
-        Err(match ultimo {
-            Some(last) if tentativi >= self.max_attempts => RouteError::Exhausted {
-                attempts: tentativi,
+        Err(match last {
+            Some(last) if attempts >= self.max_attempts => RouteError::Exhausted {
+                attempts,
                 last: Box::new(last),
             },
             Some(last) => last,
             None => RouteError::Exhausted {
-                attempts: tentativi,
+                attempts,
                 last: Box::new(RouteError::NoProviders),
             },
         })
     }
 
-    /// Un tentativo su un provider, e cosa comporta per i successivi.
+    /// One attempt on one provider, and what it implies for the following ones.
     ///
-    /// È qui che sta tutta la politica di ADR 0003, ed è una funzione a sé perché a
-    /// leggerla intera la differenza fra "proseguire" e "fermarsi" è evidente.
+    /// This is where the whole policy of ADR 0003 lives, and it is a separate function
+    /// because reading it whole makes the difference between "continue" and "stop"
+    /// evident.
     async fn attempt(&self, provider: &dyn Upstream, request: &UpstreamRequest) -> Attempt {
-        let nome = provider.name();
+        let name = provider.name();
 
-        let risposta = match provider.send(request.clone(), self.timeout).await {
+        let response = match provider.send(request.clone(), self.timeout).await {
             Ok(r) => r,
-            Err(errore) => return on_transport(nome, errore),
+            Err(error) => return on_transport(name, error),
         };
 
-        if (200..300).contains(&risposta.status) {
-            return Attempt::Served(risposta);
+        if (200..300).contains(&response.status) {
+            return Attempt::Served(response);
         }
 
-        match classify(risposta.status) {
+        match classify(response.status) {
             FailureClass::Retryable => {
                 warn!(
-                    provider = nome,
-                    status = risposta.status,
-                    "errore del provider, si prosegue"
+                    provider = name,
+                    status = response.status,
+                    "provider error, moving on"
                 );
-                Attempt::Proseguire(classify_response(nome, risposta.status, body_of(&risposta)))
+                Attempt::Continue(classify_response(name, response.status, body_of(&response)))
             }
             FailureClass::ClientFault => {
                 info!(
-                    provider = nome,
-                    status = risposta.status,
-                    "errore del cliente: nessun failover"
+                    provider = name,
+                    status = response.status,
+                    "client error: no failover"
                 );
-                Attempt::Fermarsi(classify_response(nome, risposta.status, body_of(&risposta)))
+                Attempt::Stop(classify_response(name, response.status, body_of(&response)))
             }
             FailureClass::Unknown => {
-                // amplificare un errore che non si capisce è peggio che propagarlo
+                // amplifying an error you do not understand is worse than propagating it
                 warn!(
-                    provider = nome,
-                    status = risposta.status,
-                    "stato non classificato: nessun failover su un errore non capito"
+                    provider = name,
+                    status = response.status,
+                    "unclassified status: no failover on an error that was not understood"
                 );
-                Attempt::Fermarsi(classify_response(nome, risposta.status, body_of(&risposta)))
+                Attempt::Stop(classify_response(name, response.status, body_of(&response)))
             }
         }
     }
 }
 
-/// L'esito di un tentativo, e cosa comporta per il tentativo successivo.
+/// The outcome of an attempt, and what it implies for the next one.
 #[derive(Debug)]
 enum Attempt {
-    /// Risposta buona: il giro è finito.
+    /// Good response: the round is over.
     Served(UpstreamResponse),
-    /// Errore del provider, o richiesta mai partita: si prova il successivo.
-    Proseguire(RouteError),
-    /// Errore del cliente, stato ignoto, o richiesta già partita: ci si ferma.
-    Fermarsi(RouteError),
+    /// Provider error, or request that never left: try the next one.
+    Continue(RouteError),
+    /// Client error, unknown status, or request already sent: stop.
+    Stop(RouteError),
 }
 
-/// Cosa fare quando un provider non ha risposto.
+/// What to do when a provider gave no response.
 ///
-/// La domanda non è "che errore è" ma **"la richiesta è uscita?"**: se non è uscita
-/// si prosegue, se è partita e non sappiamo se è stata eseguita no — un doppio
-/// addebito costa più di un errore (ADR 0003).
-fn on_transport(provider: &str, errore: TransportError) -> Attempt {
-    if errore.delivery == Delivery::NotSent {
+/// The question is not "which error is it" but **"did the request get out?"**: if it did
+/// not, we continue; if it did and we do not know whether it was executed, we do not —
+/// a double charge costs more than an error (ADR 0003).
+fn on_transport(provider: &str, error: TransportError) -> Attempt {
+    if error.delivery == Delivery::NotSent {
         warn!(
             provider,
-            kind = ?errore.kind,
-            detail = %errore.detail,
-            "nessuna risposta, la richiesta non era uscita: si prosegue"
+            kind = ?error.kind,
+            detail = %error.detail,
+            "no response, the request had not gone out: moving on"
         );
-        return Attempt::Proseguire(RouteError::DeliveryUnknown {
+        return Attempt::Continue(RouteError::DeliveryUnknown {
             provider: provider.to_owned(),
-            error: errore,
+            error,
         });
     }
 
     warn!(
         provider,
-        kind = ?errore.kind,
-        detail = %errore.detail,
-        "la richiesta era già partita: nessun failover per evitare un doppio addebito"
+        kind = ?error.kind,
+        detail = %error.detail,
+        "the request had already gone out: no failover, to avoid a double charge"
     );
-    Attempt::Fermarsi(RouteError::DeliveryUnknown {
+    Attempt::Stop(RouteError::DeliveryUnknown {
         provider: provider.to_owned(),
-        error: errore,
+        error,
     })
 }
 
-/// Trasforma una risposta d'errore nel suo `RouteError`, senza perderne la classe.
+/// Turns an error response into its `RouteError`, without losing its class.
 fn classify_response(provider: &str, status: u16, body: Vec<u8>) -> RouteError {
     match classify(status) {
         FailureClass::ClientFault => RouteError::ClientFault {
@@ -363,8 +364,8 @@ fn classify_response(provider: &str, status: u16, body: Vec<u8>) -> RouteError {
     }
 }
 
-/// Il corpo di una risposta, se è in memoria. Su uno streaming non c'è: ed è il
-/// motivo per cui il metering di uno streaming va fatto a valle, dal client.
+/// The body of a response, if it is in memory. On a stream there is none: and that is
+/// why metering a stream must be done downstream, by the client.
 fn body_of(response: &UpstreamResponse) -> Vec<u8> {
     match &response.body {
         ResponseBody::Buffered(b) => b.clone(),
@@ -372,10 +373,10 @@ fn body_of(response: &UpstreamResponse) -> Vec<u8> {
     }
 }
 
-/// Costruisce l'errore "la richiesta non è uscita", per chi implementa un provider e
-/// non vuole costruire l'errore a mano.
+/// Builds the "request did not go out" error, for whoever implements a provider and does
+/// not want to build the error by hand.
 #[must_use]
-pub fn errore_non_inviato(kind: TransportKind, detail: &str) -> TransportError {
+pub fn error_not_sent(kind: TransportKind, detail: &str) -> TransportError {
     TransportError::not_sent(kind, detail)
 }
 
@@ -384,46 +385,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn un_router_vuoto_ha_zero_provider() {
+    fn an_empty_router_has_zero_providers() {
         let r = Router::new(vec![], 4, Duration::from_secs(1));
         assert_eq!(r.max_attempts(), 4);
         assert!(r.providers().is_empty());
     }
 
     #[test]
-    fn un_tetto_di_zero_diventa_il_default() {
+    fn a_cap_of_zero_becomes_the_default() {
         let r = Router::new(vec![], 0, Duration::from_secs(1));
         assert_eq!(r.max_attempts(), DEFAULT_MAX_ATTEMPTS);
     }
 
     #[test]
-    fn l_errore_di_trasporto_si_stampa_in_una_riga() {
+    fn the_transport_error_prints_on_one_line() {
         let e = RouteError::DeliveryUnknown {
             provider: "a".to_owned(),
-            error: TransportError::maybe_sent(TransportKind::Timeout, "timeout dopo l'invio"),
+            error: TransportError::maybe_sent(TransportKind::Timeout, "timeout after sending"),
         };
-        let testo = e.to_string();
-        assert!(testo.contains("doppio addebito"));
+        let text = e.to_string();
+        assert!(text.contains("double charge"));
         assert!(
-            !testo.contains('\n'),
-            "un messaggio di log non deve andare a capo"
+            !text.contains('\n'),
+            "a log message must not wrap to a new line"
         );
     }
 
     #[test]
-    fn un_modello_che_nessuno_serve_lo_dice_con_lelenco_vuoto() {
+    fn a_model_nobody_serves_says_so_with_an_empty_list() {
         let e = RouteError::NoProviderForModel {
             model: "x".to_owned(),
-            servibili: vec![],
+            available: vec![],
         };
-        assert!(e.to_string().contains("(nessuno)"));
+        assert!(e.to_string().contains("(none)"));
     }
 
     #[test]
-    fn il_debug_del_router_mostra_i_provider_e_il_tetto() {
+    fn the_router_debug_shows_the_providers_and_the_cap() {
         let r = Router::new(vec![], 7, Duration::from_millis(250));
-        let testo = format!("{r:?}");
-        assert!(testo.contains("max_attempts: 7"));
-        assert!(testo.contains("250"));
+        let text = format!("{r:?}");
+        assert!(text.contains("max_attempts: 7"));
+        assert!(text.contains("250"));
     }
 }

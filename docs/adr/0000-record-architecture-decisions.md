@@ -1,56 +1,57 @@
-# ADR 0000 — Come scriviamo le decisioni
+# ADR 0000 — How we write decisions
 
-Le decisioni tecniche che *non* sono ovvie si registrano qui, una per file.
-Obiettivo: fra due anni capire **perché** il codice è fatto così, non **cosa** fa.
+The technical decisions that are *not* obvious are recorded here, one per file.
+Goal: in two years, understand **why** the code is the way it is, not **what** it does.
 
-Il formato è quello di Michael Nygard, leggero: il resto del documento nasce solo se serve.
+The format is Michael Nygard's, lightweight: the rest of the document exists only if it is
+needed.
 
-## Quando serve un ADR
+## When an ADR is needed
 
-Scrivi un ADR se, rileggendo la diff, qualcuno potrebbe chiederti *"ma perché non hai
-fatto X?"*. In pratica:
+Write an ADR if, rereading the diff, someone could ask you *"but why didn't you do X?"*.
+In practice:
 
-- scelta di una dipendenza (o del suo rifiuto)
-- algoritmo, struttura dati, formato di serializzazione
-- confine di modulo, dove finisce una responsabilità
-- scelta che lega il progetto a un servizio esterno
-- prestazione: un compromesso deliberato (memoria vs CPU, latenza vs costo)
+- choosing a dependency (or refusing one)
+- an algorithm, a data structure, a serialization format
+- a module boundary, where a responsibility ends
+- a choice that binds the project to an external service
+- performance: a deliberate trade-off (memory vs CPU, latency vs cost)
 
-**Non** serve un ADR per: nomi di funzioni, formattazione, bug fix ovvi, scelte che
-un senior farebbe uguale.
+**No** ADR is needed for: function names, formatting, obvious bug fixes, choices a senior
+would make the same way.
 
-## Formato del file
+## File format
 
-`docs/adr/NNNN-titolo-in-kebab-case.md`, numerazione progressiva mai riutilizzata.
-Le ADR sono immutabili: se la decisione cambia, ne scrivi una nuova che le sostituisce.
+`docs/adr/NNNN-title-in-kebab-case.md`, progressive numbering never reused.
+ADRs are immutable: if the decision changes, you write a new one that supersedes it.
 
 ```markdown
-# ADR NNNN — Titolo
+# ADR NNNN — Title
 
-- **Stato:** proposta | accettata | superata da [NNNN]
-- **Data:** YYYY-MM-DD
-- **Decide:** Paolo Valletta
+- **Status:** proposed | accepted | superseded by [NNNN]
+- **Date:** YYYY-MM-DD
+- **Decides:** Paolo Valletta
 
-## Contesto
-Quali forze premono. Fatti, non opinioni. Se ci sono numeri, qui.
+## Context
+Which forces are at play. Facts, not opinions. If there are numbers, they go here.
 
-## Decisione
-Cosa decidiamo, in una frase all'attivo. "Useremo X", non "è stato scelto X".
+## Decision
+What we decide, in one active sentence. "We will use X", not "X has been chosen".
 
-## Alternative
-| Opzione | Pro | Contro | Perché no |
+## Alternatives
+| Option | Pros | Cons | Why not |
 |---|---|---|---|
 | A | | | |
 | B | | | |
 
-## Conseguenze
-Cosa diventa possibile, cosa diventa impossibile, cosa ci siamo esposti.
-Le cose negative contano più delle positive.
+## Consequences
+What becomes possible, what becomes impossible, what we exposed ourselves to.
+The negative things matter more than the positive ones.
 
-## Verifica
-Come facciamo a sapere se la decisione era giusta? Quale misura, entro quale data.
+## Verification
+How do we know whether the decision was right? Which measure, by which date.
 ```
 
-## Il numero 0000
+## The number 0000
 
-Questo file non è una decisione, è la regola. Non lo rinumerare.
+This file is not a decision, it is the rule. Do not renumber it.

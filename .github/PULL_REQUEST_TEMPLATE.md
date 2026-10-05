@@ -1,9 +1,9 @@
-## Descrizione
+## Description
 
-Cosa cambia e **perché**. Non riscrivere il diff: il diff si legge da solo.
-Cinque righe bastano, e se non bastano è un segnale che la PR è troppo grossa.
+What changes and **why**. Do not rewrite the diff: the diff reads itself.
+Five lines are enough, and if they are not enough it is a signal that the PR is too big.
 
-## Tipo
+## Type
 
 - [ ] fix
 - [ ] feat
@@ -15,8 +15,8 @@ Cinque righe bastano, e se non bastano è un segnale che la PR è troppo grossa.
 
 ## Checklist
 
-- [ ] `make ci` verde in locale
-- [ ] test che coprono il caso nuovo (o una nota su perché no)
-- [ ] docs/README aggiornati se cambia il contratto
-- [ ] nessun segreto, nessun dato reale
-- [ ] ADR scritto se la decisione non è ovvia
+- [ ] `make ci` green locally
+- [ ] tests covering the new case (or a note on why not)
+- [ ] docs/README updated if the contract changes
+- [ ] no secrets, no real data
+- [ ] ADR written if the decision is not obvious

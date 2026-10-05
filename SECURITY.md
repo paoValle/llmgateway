@@ -1,16 +1,16 @@
 # Security Policy
 
-Progetto personale, nessun dato reale, nessun servizio in produzione.
+Personal project, no real data, no service in production.
 
-## Cosa NON fare
+## What NOT to do
 
-Questo codice non è mai stato auditato. Non usarlo per:
-- processare dati personali o sensibili,
-- come componente di un sistema che gira su dati di terzi,
-- in contesti dove un difetto ha conseguenze (produzione clinica, finanziaria, di sicurezza).
+This code has never been audited. Do not use it to:
+- process personal or sensitive data,
+- as a component of a system that runs on third-party data,
+- in contexts where a defect has consequences (clinical, financial, security).
 
-## Cosa fare se trovi un problema
+## What to do if you find a problem
 
-Apri un'issue pubblica. Se contiene un dettaglio che può danneggiare qualcuno,
-scrivi direttamente: pao [via la mia mail su LinkedIn / GitHub].
-Rispondo entro una settimana, o ti dico perché non posso.
+Open a public issue. If it contains a detail that could harm someone, write directly:
+pao [via my email on LinkedIn / GitHub].
+I answer within a week, or I tell you why I cannot.

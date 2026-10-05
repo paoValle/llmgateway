@@ -1,56 +1,56 @@
-//! La richiesta in arrivo, vista dal gateway.
+//! The incoming request, as seen by the gateway.
 //!
-//! Il gateway non capisce cosa contiene un prompt, e non deve. Deve però sapere tre
-//! cose, e solo tre: **qual è il modello** (per il prezzo e per il routing),
-//! **quanto output si chiede** (per stimare il costo prima di chiamare) e
-//! **se è in streaming** (per non bufferizzare).
+//! The gateway does not understand what a prompt contains, and it must not. It does
+//! have to know three things, and only three: **which model it is** (for the price and
+//! for routing), **how much output is being requested** (to estimate the cost before
+//! calling) and **whether it is streaming** (in order not to buffer).
 //!
-//! Tutto il resto del corpo viene inoltrato **byte per byte**. Non è una
-//! semplificazione: il gateway che riserializza il body di un provider finisce per
-//! perdere i campi che non conosce, e un giorno un campo nuovo arriva e sparisce
-//! senza che nessuno se ne accorga.
+//! Everything else in the body is forwarded **byte for byte**. This is not a
+//! simplification: a gateway that re-serializes a provider's body ends up losing the
+//! fields it does not know about, and one day a new field arrives and disappears
+//! without anyone noticing.
 //!
-//! I tipi sono estratti dal body JSON senza tipizzarlo tutto: un `serde_json::Value`
-//! dell'intera richiesta costerebbe un parse completo per due stringhe.
+//! The types are extracted from the JSON body without typing all of it: a
+//! `serde_json::Value` of the whole request would cost a full parse for two strings.
 
 use serde::Deserialize;
 
-/// I byte di un body HTTP.
+/// The bytes of an HTTP body.
 pub type Bytes = Vec<u8>;
 
-/// Byte per token, la stima standard per i testi in inglese.
+/// Bytes per token, the standard estimate for English texts.
 ///
-/// Per eccesso significa che **non si sottovaluta mai**: un testo italiano o del
-/// codice usa più token per carattere, e il divisore va bene per un tetto, male per
-/// un preventivo. Vedi ADR 0002.
+/// Rounded up means it **never underestimates**: an Italian text or code uses more
+/// tokens per character, and the divisor is fine for a cap, wrong for a quote.
+/// See ADR 0002.
 pub const BYTES_PER_TOKEN: usize = 4;
 
-/// Output massimo che si presume quando il client non lo dichiara.
+/// Maximum output assumed when the client does not declare it.
 ///
-/// Volutamente generoso: se il client non dice quanto vuole generare, si presume il
-/// peggio. Sottovalutare qui significa che il tetto non copre.
+/// Deliberately generous: if the client does not say how much it wants to generate,
+/// the worst is assumed. Underestimating here means the cap does not cover.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 4_096;
 
-/// Quanto il gateway ha capito di una richiesta.
+/// How much the gateway understood of a request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestShape {
-    /// Il modello richiesto. `None` se il body non lo dichiara in modo leggibile.
+    /// The requested model. `None` if the body does not declare it in a readable way.
     pub model: Option<String>,
-    /// I token di output massimi dichiarati dal client, se lo fa.
+    /// The maximum output tokens declared by the client, if it does.
     pub max_output_tokens: Option<u64>,
-    /// `true` se il client ha chiesto lo streaming.
+    /// `true` if the client asked for streaming.
     pub stream: bool,
-    /// La stima dei token di input.
+    /// The estimate of the input tokens.
     pub estimated_input_tokens: u64,
-    /// La lunghezza del body, che è ciò che si fa pagare in banda.
+    /// The length of the body, which is what is charged for in bandwidth.
     pub body_bytes: usize,
 }
 
-/// I tre campi che il gateway deve leggere dal body.
+/// The three fields the gateway must read from the body.
 ///
-/// `deny_unknown_fields` **non** c'è, e questa è la scelta: il body appartiene al
-/// provider, non al gateway, e rifiutarlo perché ha un campo in più significherebbe
-/// che il gateway deve essere aggiornato ogni volta che il provider ne aggiunge uno.
+/// `deny_unknown_fields` is **not** there, and that is the choice: the body belongs to
+/// the provider, not to the gateway, and rejecting it because it has one extra field
+/// would mean the gateway must be updated every time the provider adds one.
 #[derive(Debug, Deserialize)]
 struct ModelAndLimits {
     model: Option<String>,
@@ -58,43 +58,43 @@ struct ModelAndLimits {
     stream: Option<bool>,
 }
 
-/// Legge dal body tutto ciò che serve al gateway, e **non solleva mai**.
+/// Reads everything the gateway needs from the body, and **never raises**.
 ///
-/// Un body non è JSON, o è JSON senza `model`, non è un errore del gateway: è una
-/// richiesta che il provider rifiuterà. Qui si estrae quello che si può, e si lascia
-/// la diagnosi a chi sa rispondere (il provider, o il router se nessuno lo sa fare).
+/// A body that is not JSON, or is JSON without `model`, is not a gateway error: it is a
+/// request the provider will reject. Here we extract what we can, and leave the
+/// diagnosis to whoever can answer (the provider, or the router if nobody can).
 #[must_use]
 pub fn inspect(body: &[u8], max_output_default: u64) -> RequestShape {
-    let forma: Option<ModelAndLimits> = serde_json::from_slice(body).ok();
+    let shape: Option<ModelAndLimits> = serde_json::from_slice(body).ok();
 
     RequestShape {
-        model: forma.as_ref().and_then(|f| f.model.clone()),
-        max_output_tokens: forma
+        model: shape.as_ref().and_then(|f| f.model.clone()),
+        max_output_tokens: shape
             .as_ref()
             .and_then(|f| f.max_tokens)
             .filter(|n| *n > 0)
             .or(Some(max_output_default)),
-        stream: forma.as_ref().and_then(|f| f.stream).unwrap_or(false),
+        stream: shape.as_ref().and_then(|f| f.stream).unwrap_or(false),
         estimated_input_tokens: estimate_input_tokens(body.len()),
         body_bytes: body.len(),
     }
 }
 
-/// I token di input stimati dalla lunghezza del body.
+/// The input tokens estimated from the length of the body.
 ///
-/// Arrotondata **per eccesso**: una stima che sottovaluta è una stima che lascia
-/// passare richieste costose, e il tetto smette di coprire.
+/// Rounded **up**: an estimate that underestimates is an estimate that lets expensive
+/// requests through, and the cap stops covering.
 #[must_use]
 pub fn estimate_input_tokens(body_bytes: usize) -> u64 {
     body_bytes.div_ceil(BYTES_PER_TOKEN) as u64
 }
 
 impl RequestShape {
-    /// Il tetto massimo che questa richiesta può costare, dato un prezzo.
+    /// The maximum amount this request can cost, given a price.
     ///
-    /// È la stima prenotata prima di chiamare: input stimato più output massimo,
-    /// entrambi al prezzo indicato. `None` senza un modello: senza modello non c'è
-    /// prezzo, e il tetto non può essere calcolato.
+    /// It is the estimate reserved before calling: estimated input plus maximum output,
+    /// both at the stated price. `None` without a model: without a model there is no
+    /// price, and the cap cannot be computed.
     #[must_use]
     pub fn worst_case_cost(
         &self,
@@ -111,94 +111,94 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legge_modello_e_output_massimo() {
-        let body = br#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ciao"}],"max_tokens":256}"#;
-        let forma = inspect(body, DEFAULT_MAX_OUTPUT_TOKENS);
-        assert_eq!(forma.model.as_deref(), Some("gpt-4o-mini"));
-        assert_eq!(forma.max_output_tokens, Some(256));
-        assert!(!forma.stream);
+    fn reads_model_and_max_output() {
+        let body = br#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}],"max_tokens":256}"#;
+        let shape = inspect(body, DEFAULT_MAX_OUTPUT_TOKENS);
+        assert_eq!(shape.model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(shape.max_output_tokens, Some(256));
+        assert!(!shape.stream);
     }
 
     #[test]
-    fn senza_max_tokens_si_presume_il_peggio() {
-        // se il client non lo dichiara, si stima il massimo configurato: sottovalutare
-        // qui significa che il tetto non copre
-        let forma = inspect(br#"{"model":"m"}"#, 8192);
-        assert_eq!(forma.max_output_tokens, Some(8192));
+    fn without_max_tokens_the_worst_is_assumed() {
+        // if the client does not declare it, the configured maximum is estimated:
+        // underestimating here means the cap does not cover
+        let shape = inspect(br#"{"model":"m"}"#, 8192);
+        assert_eq!(shape.max_output_tokens, Some(8192));
     }
 
     #[test]
-    fn max_tokens_zero_vale_come_non_dichiarato() {
-        // zero token di output non ha senso in una richiesta vera: è un bug del client,
-        // e il tetto non deve coprirlo come se fosse una richiesta gratuita
-        let forma = inspect(br#"{"model":"m","max_tokens":0}"#, 4096);
-        assert_eq!(forma.max_output_tokens, Some(4096));
+    fn max_tokens_zero_counts_as_undeclared() {
+        // zero output tokens makes no sense in a real request: it is a client bug,
+        // and the cap must not cover it as if it were a free request
+        let shape = inspect(br#"{"model":"m","max_tokens":0}"#, 4096);
+        assert_eq!(shape.max_output_tokens, Some(4096));
     }
 
     #[test]
-    fn lo_streaming_si_riconosce() {
+    fn streaming_is_recognized() {
         assert!(inspect(br#"{"model":"m","stream":true}"#, 4096).stream);
         assert!(!inspect(br#"{"model":"m","stream":false}"#, 4096).stream);
     }
 
     #[test]
-    fn i_campi_sconosciuti_non_sono_un_problema() {
-        // il body è del provider: un campo nuovo non può rendere la richiesta
-        // illeggibile per il gateway
-        let corpo = br#"{"model":"m","temperature":0.7,"tools":[{"type":"function"}],"reasoning_effort":"high"}"#;
-        assert_eq!(inspect(corpo, 4096).model.as_deref(), Some("m"));
+    fn unknown_fields_are_not_a_problem() {
+        // the body belongs to the provider: a new field cannot make the request
+        // unreadable for the gateway
+        let body = br#"{"model":"m","temperature":0.7,"tools":[{"type":"function"}],"reasoning_effort":"high"}"#;
+        assert_eq!(inspect(body, 4096).model.as_deref(), Some("m"));
     }
 
     #[test]
-    fn un_body_illeggibile_non_fa_panorama_e_da_modello_sconosciuto() {
-        // non è un errore del gateway: è una richiesta che il provider rifiuterà
-        let forma = inspect("non è json".as_bytes(), 4096);
-        assert_eq!(forma.model, None);
-        assert_eq!(forma.max_output_tokens, Some(4096));
-        assert!(!forma.stream);
+    fn an_unreadable_body_does_not_panic_and_is_an_unknown_model() {
+        // it is not a gateway error: it is a request the provider will reject
+        let shape = inspect("not json".as_bytes(), 4096);
+        assert_eq!(shape.model, None);
+        assert_eq!(shape.max_output_tokens, Some(4096));
+        assert!(!shape.stream);
         assert_eq!(
-            forma.estimated_input_tokens, 3,
-            "11 byte arrotondati per eccesso: 3 token"
+            shape.estimated_input_tokens, 2,
+            "8 bytes rounded up: 2 tokens"
         );
     }
 
     #[test]
-    fn la_stima_dei_token_arrotonda_per_eccesso() {
+    fn the_token_estimate_rounds_up() {
         assert_eq!(estimate_input_tokens(0), 0);
         assert_eq!(estimate_input_tokens(1), 1);
         assert_eq!(estimate_input_tokens(4), 1);
         assert_eq!(
             estimate_input_tokens(5),
             2,
-            "mai sotto: 5 byte sono almeno 2 token"
+            "never under: 5 bytes are at least 2 tokens"
         );
         assert_eq!(estimate_input_tokens(401), 101);
     }
 
     #[test]
-    fn il_costo_peggiore_usa_input_stimato_e_output_massimo() {
+    fn the_worst_case_uses_estimated_input_and_maximum_output() {
         let body = br#"{"model":"m","max_tokens":1000}"#;
-        let forma = inspect(body, 4096);
-        let prezzo = crate::pricing::Price {
+        let shape = inspect(body, 4096);
+        let price = crate::pricing::Price {
             input: 150,
             output: 600,
         };
 
-        // il body è lungo: la stima dell'input deve entrare nel conto
-        let atteso = prezzo.cost(forma.estimated_input_tokens, 1000);
-        assert_eq!(forma.worst_case_cost(prezzo), Some(atteso));
+        // the body is long: the input estimate must be part of the math
+        let expected = price.cost(shape.estimated_input_tokens, 1000);
+        assert_eq!(shape.worst_case_cost(price), Some(expected));
     }
 
     #[test]
-    fn senza_modello_il_costo_peggiore_non_si_calcola() {
-        let forma = inspect(b"rotta", 4096);
-        assert_eq!(forma.worst_case_cost(crate::pricing::Price::ZERO), None);
+    fn without_a_model_the_worst_case_is_not_computed() {
+        let shape = inspect(b"broken", 4096);
+        assert_eq!(shape.worst_case_cost(crate::pricing::Price::ZERO), None);
     }
 
     #[test]
-    fn un_body_vuoto_non_e_un_panic() {
-        let forma = inspect(b"", 4096);
-        assert_eq!(forma.estimated_input_tokens, 0);
-        assert_eq!(forma.body_bytes, 0);
+    fn an_empty_body_is_not_a_panic() {
+        let shape = inspect(b"", 4096);
+        assert_eq!(shape.estimated_input_tokens, 0);
+        assert_eq!(shape.body_bytes, 0);
     }
 }

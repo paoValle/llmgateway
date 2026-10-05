@@ -1,22 +1,22 @@
-//! Il metering: quanto è costato, e a chi.
+//! Metering: what it cost, and to whom.
 //!
-//! Un modulo con una proprietà sola, che è il motivo per cui esiste come modulo
-//! separato: **non ha modo di fallire.** Nessun `Result`, nessun panico, nessuna
-//! dipendenza che possa mancare. Se qualcosa non torna — un modello non in listino,
-//! un contatore che trabocca, un tenant mai visto — la funzione degrada, e il fatto
-//! che ha degradato è visibile in [`Meter::errors`].
+//! A module with a single property, which is why it exists as a separate module:
+//! **it has no way to fail.** No `Result`, no panic, no dependency that can be missing.
+//! If something is off — a model not in the price list, a counter that overflows, a
+//! tenant never seen before — the function degrades, and the fact that it degraded is
+//! visible in [`Meter::errors`].
 //!
-//! Il perché è in ADR 0004 e vale la pena ripeterlo: se il contabile fa cadere il
-//! servizio, l'utente non riceve la risposta e il ticket che arriva è "il gateway è
-//! lento". Il contatore perso si recupera dalla fattura del provider. La risposta
-//! persa no.
+//! The reason is in ADR 0004 and is worth repeating: if the accountant brings down the
+//! service, the user does not get the response and the ticket that arrives is "the
+//! gateway is slow". A lost counter is recovered from the provider's invoice. A lost
+//! response is not.
 //!
-//! Due precisioni, e la differenza è voluta (ADR 0005):
+//! Two precisions, and the difference is intended (ADR 0005):
 //!
-//! - **il denaro è esatto**, per tenant. Non è campionato: è il numero per cui il
-//!   gateway esiste.
-//! - **le metriche operative sono campionate** 1 su N. Contarle tutte costa un
-//!   lock su ogni richiesta, e il contatore globale diventa un collo di bottiglia.
+//! - **money is exact**, per tenant. It is not sampled: it is the number the gateway
+//!   exists for.
+//! - **operating metrics are sampled** 1 in N. Counting them all costs a lock on every
+//!   request, and the global counter becomes a bottleneck.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,67 +25,68 @@ use std::sync::{Arc, RwLock};
 use crate::pricing::{MicroUsd, Price, PriceTable, Usage};
 use crate::request::RequestShape;
 
-/// Un tenant, con i suoi contatori esatti.
+/// A tenant, with its exact counters.
 #[derive(Debug, Default)]
 struct TenantTotals {
-    /// Denaro speso. **Mai campionato**: è il dato per cui il gateway esiste.
+    /// Money spent. **Never sampled**: it is the number the gateway exists for.
     spent: AtomicU64,
-    /// Richieste servite con successo.
+    /// Requests served successfully.
     served: AtomicU64,
-    /// Richieste respinte dal tetto.
+    /// Requests rejected by the cap.
     budget_denied: AtomicU64,
-    /// Richieste che non sono arrivate da nessun provider.
+    /// Requests that did not reach any provider.
     failed: AtomicU64,
-    /// Richieste servite **senza il tetto**, perché il suo stato non era leggibile.
+    /// Requests served **without the cap**, because its state was not readable.
     ///
-    /// È l'allarme più importante del gateway: da quel momento il tetto non protegge
-    /// più nessuno, e finché il numero è a zero il servizio è sotto controllo.
-    senza_tetto: AtomicU64,
+    /// It is the most important alarm of the gateway: from that moment the cap no longer
+    /// protects anyone, and as long as the number is zero the service is under control.
+    uncovered: AtomicU64,
 }
 
-/// Come è finita una richiesta, dal punto di vista del conto.
+/// How a request ended, from the accounting point of view.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Esito {
-    /// Risposta 2xx da un provider.
-    Servito {
-        /// Chi ha risposto.
+pub enum Outcome {
+    /// A 2xx response from a provider.
+    Served {
+        /// Who answered.
         provider: String,
-        /// Il modello di listino usato. Se il modello non era in tabella è il prezzo
-        /// peggiore noto, non zero.
-        prezzo_stimato: bool,
+        /// Whether the price list entry used is an estimate. If the model was not in the
+        /// table, the worst known price was used, not zero.
+        price_estimated: bool,
     },
-    /// Rifiutata dal tetto, senza che nessun provider fosse chiamato.
-    TettoNegato,
-    /// Non è arrivata risposta da nessun provider.
-    Fallito {
-        /// L'ultimo provider provato, per il log.
+    /// Rejected by the cap, without any provider being called.
+    BudgetDenied,
+    /// No response arrived from any provider.
+    Failed {
+        /// The last provider tried, for the log.
         provider: String,
     },
 }
 
-/// Il contatore.
+/// The counter.
 #[derive(Debug)]
 pub struct Meter {
     prices: PriceTable,
-    /// I tenant incontrati. Crescono con l'uso, non con la configurazione: è la
-    /// differenza fra un gateway che conosce i suoi clienti e uno che li scopre.
+    /// The tenants encountered. They grow with usage, not with configuration: that is
+    /// the difference between a gateway that knows its clients and one that discovers
+    /// them.
     totals: RwLock<BTreeMap<String, Arc<TenantTotals>>>,
-    /// Tasso di campionamento delle metriche operative. 1 = esatte.
+    /// Sampling rate for operating metrics. 1 = exact.
     sample_rate: u64,
-    /// Contatore di campionamento: ogni N eventi, uno viene contato.
+    /// Sampling ticker: every N events, one is counted.
     ticker: AtomicU64,
-    /// Volte in cui il metering ha dovuto degradare. Sale invece di far fallire.
+    /// Times metering had to degrade. It goes up instead of failing.
     errors: AtomicU64,
-    /// Richieste viste in assoluto, anche quando non campionate.
+    /// Requests seen in total, even when not sampled.
     seen: AtomicU64,
-    /// Conti calcolati su un modello fuori listino: vanno verificati a mano.
+    /// Bills computed on a model outside the price list: they must be checked by hand.
     estimated: AtomicU64,
-    /// Servite senza tetto, su tutti i tenant.
-    senza_tetto_totali: AtomicU64,
+    /// Served without the cap, across all tenants.
+    uncovered_total: AtomicU64,
 }
 
 impl Meter {
-    /// Crea un contatore. `sample_rate` è 1 su N per le metriche operative.
+    /// Creates a counter. `sample_rate` is 1 in N for operating metrics.
     #[must_use]
     pub fn new(prices: PriceTable, sample_rate: u64) -> Self {
         Self {
@@ -96,186 +97,185 @@ impl Meter {
             errors: AtomicU64::new(0),
             seen: AtomicU64::new(0),
             estimated: AtomicU64::new(0),
-            senza_tetto_totali: AtomicU64::new(0),
+            uncovered_total: AtomicU64::new(0),
         }
     }
 
-    /// Il prezzo che verrà usato per un modello, e se è quello dichiarato.
+    /// The price that will be used for a model, and whether it is the declared one.
     ///
-    /// `prezzo_stimato = true` significa che il modello non era in listino e si sta
-    /// usando il peggiore noto: è un segnale di allarme, non un dettaglio.
+    /// `price_estimated = true` means the model was not in the price list and the worst
+    /// known price is being used: it is an alarm, not a detail.
     #[must_use]
-    pub fn prezzo_per(&self, model: &str) -> (Price, bool) {
+    pub fn price_for(&self, model: &str) -> (Price, bool) {
         (self.prices.resolve(model), !self.prices.knows(model))
     }
 
-    /// Registra una richiesta servita. **Non può fallire.**
-    pub fn registr(&self, tenant: &str, forma: &RequestShape, usage: Usage, esito: &Esito) {
+    /// Records a served request. **It cannot fail.**
+    pub fn record(&self, tenant: &str, shape: &RequestShape, usage: Usage, outcome: &Outcome) {
         self.seen.fetch_add(1, Ordering::Relaxed);
 
-        // l'unico posto in cui il metering può degradare, e dichiara di averlo fatto
-        let (prezzo, stimato) = if let Some(modello) = forma.model.as_deref() {
-            self.prezzo_per(modello)
+        // the only place where metering can degrade, and it declares that it did
+        let (price, estimated) = if let Some(model) = shape.model.as_deref() {
+            self.price_for(model)
         } else {
-            // nessun modello: nessun listino, nessun costo. Si conta l'errore e si
-            // va avanti — sarà il provider a rispondere che non capisce la richiesta
+            // no model: no price list entry, no cost. The error is counted and we move
+            // on — the provider will answer that it does not understand the request
             self.errors.fetch_add(1, Ordering::Relaxed);
             (Price::ZERO, true)
         };
-        if stimato {
-            // un modello fuori listino è un allarme, non un dettaglio: il tetto è
-            // calcolato sul prezzo peggiore e il conto va verificato
+        if estimated {
+            // a model outside the price list is an alarm, not a detail: the cap is
+            // computed on the worst price and the bill must be checked
             self.estimated.fetch_add(1, Ordering::Relaxed);
         }
 
-        let costo = prezzo.cost(usage.input_tokens, usage.output_tokens);
+        let cost = price.cost(usage.input_tokens, usage.output_tokens);
 
-        // il denaro è esatto, e non è campionato: è il numero per cui il gateway esiste
-        self.totali_del(tenant)
+        // money is exact, and it is not sampled: it is the number the gateway exists for
+        self.totals_for(tenant)
             .spent
-            .fetch_add(costo, Ordering::Relaxed);
+            .fetch_add(cost, Ordering::Relaxed);
 
-        if !self.campiona() {
+        if !self.should_sample() {
             return;
         }
-        let contatori = self.totali_del(tenant);
-        match esito {
-            Esito::Servito { .. } => {
-                contatori.served.fetch_add(1, Ordering::Relaxed);
+        let counters = self.totals_for(tenant);
+        match outcome {
+            Outcome::Served { .. } => {
+                counters.served.fetch_add(1, Ordering::Relaxed);
             }
-            Esito::TettoNegato => {
-                contatori.budget_denied.fetch_add(1, Ordering::Relaxed);
+            Outcome::BudgetDenied => {
+                counters.budget_denied.fetch_add(1, Ordering::Relaxed);
             }
-            &Esito::Fallito { .. } => {
-                contatori.failed.fetch_add(1, Ordering::Relaxed);
+            &Outcome::Failed { .. } => {
+                counters.failed.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 
-    /// Registra una richiesta servita **senza che il tetto fosse stato controllato**.
+    /// Records a request served **without the cap having been checked**.
     ///
-    /// Succede solo quando lo stato del tetto non è leggibile. Non è un errore da
-    /// nascondere: è il momento in cui il tetto smette di proteggere, e il numero va
-    /// in pagina per l'allarme.
-    pub fn registr_senza_tetto(&self, tenant: &str) {
-        self.senza_tetto_totali.fetch_add(1, Ordering::Relaxed);
-        self.totali_del(tenant)
-            .senza_tetto
+    /// It only happens when the cap state is not readable. It is not an error to hide:
+    /// it is the moment the cap stops protecting, and the number goes on a dashboard for
+    /// the alarm.
+    pub fn record_uncovered(&self, tenant: &str) {
+        self.uncovered_total.fetch_add(1, Ordering::Relaxed);
+        self.totals_for(tenant)
+            .uncovered
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Quante richieste in totale sono state servite senza il tetto.
+    /// How many requests in total were served without the cap.
     ///
-    /// Su zero, il tetto protegge. Su un numero, no: e finché non torna a zero il
-    /// gateway sta spendendo senza controllo.
+    /// At zero, the cap protects. At any other number, it does not: and until it goes
+    /// back to zero the gateway is spending without control.
     #[must_use]
-    pub fn servite_senza_tetto(&self) -> u64 {
-        self.senza_tetto_totali.load(Ordering::Relaxed)
+    pub fn served_uncovered(&self) -> u64 {
+        self.uncovered_total.load(Ordering::Relaxed)
     }
 
-    /// Registra un rifiuto per tetto. Il provider non è stato chiamato: il denaro
-    /// speso è zero, ma la richiesta è comunque un'informazione che serve.
-    pub fn registr_tetto_negato(&self, tenant: &str) {
+    /// Records a rejection by the cap. The provider was not called: the money spent is
+    /// zero, but the request is information that is needed anyway.
+    pub fn record_budget_denied(&self, tenant: &str) {
         self.seen.fetch_add(1, Ordering::Relaxed);
-        let contatori = self.totali_del(tenant);
-        if self.campiona() {
-            contatori.budget_denied.fetch_add(1, Ordering::Relaxed);
+        let counters = self.totals_for(tenant);
+        if self.should_sample() {
+            counters.budget_denied.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    /// Quanto ha speso un tenant. **Esatto**, mai campionato.
+    /// How much a tenant spent. **Exact**, never sampled.
     ///
-    /// Un tenant mai visto ha speso zero, non "non lo so": il gateway lo conosce
-    /// dalla configurazione, e se non c'è nessun errore registrato non ha speso.
+    /// A tenant never seen before spent zero, not "I do not know": the gateway knows it
+    /// from the configuration, and if there is no recorded error it did not spend.
     #[must_use]
-    pub fn speso(&self, tenant: &str) -> MicroUsd {
-        self.totali_del(tenant).spent.load(Ordering::Relaxed)
+    pub fn spent(&self, tenant: &str) -> MicroUsd {
+        self.totals_for(tenant).spent.load(Ordering::Relaxed)
     }
 
-    /// La fotografia di un tenant, se esiste.
+    /// The snapshot of a tenant, if it exists.
     ///
-    /// `None` significa che quel tenant non ha ancora fatto nessuna richiesta: non
-    /// che abbia speso zero. La differenza serve in `/metrics`, dove una riga
-    /// assente e uno zero raccontano storie diverse.
+    /// `None` means that tenant has not made any request yet: not that it spent zero.
+    /// The difference matters in `/metrics`, where an absent row and a zero tell
+    /// different stories.
     #[must_use]
-    pub fn snapshot_di(&self, tenant: &str) -> Option<TenantSnapshot> {
+    pub fn snapshot_for(&self, tenant: &str) -> Option<TenantSnapshot> {
         let t = self.totals.read().ok()?.get(tenant)?.clone();
         Some(snapshot_of(&t))
     }
 
-    /// Quante richieste di un tenant sono state negate dal tetto.
+    /// How many requests of a tenant were denied by the cap.
     ///
-    /// Campionato come le altre metriche operative: è un numero di diagnostica, non
-    /// un conto.
+    /// Sampled like the other operating metrics: it is a diagnostic number, not a bill.
     #[must_use]
-    pub fn spesi_negati(&self, tenant: &str) -> u64 {
-        self.snapshot_di(tenant).map_or(0, |s| s.budget_denied)
+    pub fn denied(&self, tenant: &str) -> u64 {
+        self.snapshot_for(tenant).map_or(0, |s| s.budget_denied)
     }
 
-    /// Le fotografie di tutti i tenant incontrati, per `/metrics`.
+    /// The snapshots of all tenants encountered, for `/metrics`.
     #[must_use]
     pub fn snapshots(&self) -> Vec<TenantSnapshot> {
-        let tutti: Vec<Arc<TenantTotals>> = match self.totals.read() {
+        let all: Vec<Arc<TenantTotals>> = match self.totals.read() {
             Ok(t) => t.values().cloned().collect(),
             Err(_) => return Vec::new(),
         };
-        tutti.iter().map(|t| snapshot_of(t)).collect()
+        all.iter().map(|t| snapshot_of(t)).collect()
     }
 
-    /// Quante volte il metering ha dovuto degradare. Su zero, tutto è andato.
+    /// How many times metering had to degrade. At zero, everything went fine.
     #[must_use]
     pub fn errors(&self) -> u64 {
         self.errors.load(Ordering::Relaxed)
     }
 
-    /// Conti calcolati su un modello **fuori listino**, con il prezzo peggiore noto.
+    /// Bills computed on a model **outside the price list**, with the worst known price.
     ///
-    /// Su zero, ogni modello che è passato è un modello che si conosce. Su un numero
-    /// alto, o il listino va aggiornato, o il gateway sta servendo qualcosa che non
-    /// era previsto.
+    /// At zero, every model that went through is a model that is known. At a high
+    /// number, either the price list needs updating, or the gateway is serving something
+    /// that was not expected.
     #[must_use]
     pub fn estimated(&self) -> u64 {
         self.estimated.load(Ordering::Relaxed)
     }
 
-    /// Quante richieste sono passate, campionate o no.
+    /// How many requests went through, sampled or not.
     #[must_use]
     pub fn seen(&self) -> u64 {
         self.seen.load(Ordering::Relaxed)
     }
 
-    /// Il tasso di campionamento effettivo: `1` significa che ogni metrica è esatta.
+    /// The effective sampling rate: `1` means every metric is exact.
     #[must_use]
     pub fn sample_rate(&self) -> u64 {
         self.sample_rate
     }
 
-    /// I totali di un tenant, creandoli se non esistono.
+    /// The totals of a tenant, creating them if they do not exist.
     ///
-    /// Se il lock è avvelenato si registra un errore e si restituisce un contatore
-    /// "usa e getta": **la richiesta viene comunque servita**, che è il punto.
-    fn totali_del(&self, tenant: &str) -> Arc<TenantTotals> {
+    /// If the lock is poisoned an error is recorded and a throwaway counter is returned:
+    /// **the request is served anyway**, which is the point.
+    fn totals_for(&self, tenant: &str) -> Arc<TenantTotals> {
         if let Ok(t) = self.totals.read() {
-            if let Some(esistenti) = t.get(tenant) {
-                return Arc::clone(esistenti);
+            if let Some(existing) = t.get(tenant) {
+                return Arc::clone(existing);
             }
         }
 
-        let nuovo = Arc::new(TenantTotals::default());
+        let fresh = Arc::new(TenantTotals::default());
         if let Ok(mut t) = self.totals.write() {
             return Arc::clone(
                 t.entry(tenant.to_owned())
-                    .or_insert_with(|| Arc::clone(&nuovo)),
+                    .or_insert_with(|| Arc::clone(&fresh)),
             );
         }
-        // il lock è avvelenato da un panic altrui: si degrada, si conta l'errore, e la
-        // richiesta va avanti con un contatore usa-e-getta
+        // the lock was poisoned by someone else's panic: we degrade, count the error, and
+        // the request goes on with a throwaway counter
         self.errors.fetch_add(1, Ordering::Relaxed);
-        nuovo
+        fresh
     }
 
-    /// Tocca il contatore di campionamento e dice se questo evento va contato.
-    fn campiona(&self) -> bool {
+    /// Ticks the sampling counter and says whether this event should be counted.
+    fn should_sample(&self) -> bool {
         let n = self.ticker.fetch_add(1, Ordering::Relaxed) + 1;
         n % self.sample_rate == 0
     }
@@ -287,23 +287,23 @@ fn snapshot_of(t: &TenantTotals) -> TenantSnapshot {
         served: t.served.load(Ordering::Relaxed),
         budget_denied: t.budget_denied.load(Ordering::Relaxed),
         failed: t.failed.load(Ordering::Relaxed),
-        senza_tetto: t.senza_tetto.load(Ordering::Relaxed),
+        uncovered: t.uncovered.load(Ordering::Relaxed),
     }
 }
 
-/// La fotografia di un tenant per `/metrics`.
+/// A tenant snapshot for `/metrics`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TenantSnapshot {
-    /// Denaro speso, **esatto**.
+    /// Money spent, **exact**.
     pub spent: MicroUsd,
-    /// Richieste servite, campionate.
+    /// Requests served, sampled.
     pub served: u64,
-    /// Rifiuti per tetto, campionati.
+    /// Rejections by the cap, sampled.
     pub budget_denied: u64,
-    /// Fallite, campionate.
+    /// Failed, sampled.
     pub failed: u64,
-    /// Servite senza il tetto. **Mai campionato**: è un allarme, non una statistica.
-    pub senza_tetto: u64,
+    /// Served without the cap. **Never sampled**: it is an alarm, not a statistic.
+    pub uncovered: u64,
 }
 
 #[cfg(test)]
@@ -311,17 +311,17 @@ mod tests {
     use super::*;
     use crate::pricing::micros;
 
-    fn prezzi() -> PriceTable {
+    fn prices() -> PriceTable {
         let mut m = BTreeMap::new();
         m.insert(
-            "economico".to_owned(),
+            "cheap".to_owned(),
             Price {
                 input: micros(150),
                 output: micros(600),
             },
         );
         m.insert(
-            "costoso".to_owned(),
+            "expensive".to_owned(),
             Price {
                 input: micros(2_500),
                 output: micros(10_000),
@@ -330,9 +330,9 @@ mod tests {
         PriceTable::new(m)
     }
 
-    fn forma(modello: &str) -> RequestShape {
+    fn shape(model: &str) -> RequestShape {
         RequestShape {
-            model: Some(modello.to_owned()),
+            model: Some(model.to_owned()),
             max_output_tokens: Some(1_000),
             stream: false,
             estimated_input_tokens: 1_000,
@@ -341,140 +341,140 @@ mod tests {
     }
 
     fn meter() -> Meter {
-        Meter::new(prezzi(), 1)
+        Meter::new(prices(), 1)
     }
 
     #[test]
-    fn il_conto_di_un_tenant_è_esatto() {
+    fn a_tenant_bill_is_exact() {
         let m = meter();
-        m.registr(
+        m.record(
             "acme",
-            &forma("economico"),
+            &shape("cheap"),
             Usage {
                 input_tokens: 1_000,
                 output_tokens: 500,
             },
-            &Esito::Servito {
+            &Outcome::Served {
                 provider: "a".to_owned(),
-                prezzo_stimato: false,
+                price_estimated: false,
             },
         );
 
-        // 1000×150/1e6 + 500×600/1e6 = 0.15 + 0.3 = 0.45 µUSD → 1 per eccesso
-        assert_eq!(m.speso("acme"), 1);
+        // 1000×150/1e6 + 500×600/1e6 = 0.15 + 0.3 = 0.45 µUSD → 1 rounded up
+        assert_eq!(m.spent("acme"), 1);
     }
 
     #[test]
-    fn i_conti_di_due_tenant_non_si_mescolano() {
+    fn the_bills_of_two_tenants_do_not_mix() {
         let m = meter();
-        m.registr(
+        m.record(
             "acme",
-            &forma("costoso"),
+            &shape("expensive"),
             Usage {
                 input_tokens: 1_000_000,
                 output_tokens: 0,
             },
-            &Esito::Servito {
+            &Outcome::Served {
                 provider: "a".to_owned(),
-                prezzo_stimato: false,
+                price_estimated: false,
             },
         );
-        m.registr(
+        m.record(
             "beta",
-            &forma("economico"),
+            &shape("cheap"),
             Usage {
                 input_tokens: 1,
                 output_tokens: 0,
             },
-            &Esito::Servito {
+            &Outcome::Served {
                 provider: "a".to_owned(),
-                prezzo_stimato: false,
+                price_estimated: false,
             },
         );
 
-        assert_eq!(m.speso("acme"), 2_500);
-        assert_eq!(m.speso("beta"), 1);
-        assert_eq!(m.speso("gamma"), 0, "un tenant mai visto ha speso zero");
+        assert_eq!(m.spent("acme"), 2_500);
+        assert_eq!(m.spent("beta"), 1);
+        assert_eq!(m.spent("gamma"), 0, "a tenant never seen before spent zero");
     }
 
     #[test]
-    fn un_modello_sconosciuto_si_conta_al_prezzo_peggiore_e_lo_dice() {
+    fn an_unknown_model_is_counted_at_the_worst_price_and_says_so() {
         let m = meter();
-        let (prezzo, stimato) = m.prezzo_per("modello-del-futuro");
-        assert!(stimato, "il gateway deve sapere che sta stimando");
+        let (price, estimated) = m.price_for("model-of-the-future");
+        assert!(estimated, "the gateway must know it is estimating");
         assert_eq!(
-            prezzo,
+            price,
             Price {
                 input: micros(2_500),
                 output: micros(10_000)
             }
         );
-        assert!(!m.prezzo_per("economico").1);
+        assert!(!m.price_for("cheap").1);
     }
 
     #[test]
-    fn una_forma_senza_modello_non_panorama_e_contabilizza_zero() {
+    fn a_shape_with_no_model_does_not_panic_and_accounts_for_zero() {
         let m = meter();
-        let mut f = forma("economico");
+        let mut f = shape("cheap");
         f.model = None;
-        m.registr(
+        m.record(
             "acme",
             &f,
             Usage {
                 input_tokens: 1_000,
                 output_tokens: 500,
             },
-            &Esito::Servito {
+            &Outcome::Served {
                 provider: "a".to_owned(),
-                prezzo_stimato: false,
+                price_estimated: false,
             },
         );
-        // senza modello non c'è prezzo: si conta zero e si registra l'errore,
-        // ma la richiesta è comunque stata servita
-        assert_eq!(m.speso("acme"), 0);
+        // without a model there is no price: zero is counted and the error is recorded,
+        // but the request was served anyway
+        assert_eq!(m.spent("acme"), 0);
         assert_eq!(m.errors(), 1);
     }
 
     #[test]
-    fn il_campionamento_risparmia_le_metriche_ma_non_il_denaro() {
-        // è la distinzione di ADR 0005: contare ogni richiesta su un contatore globale
-        // costa un lock su ogni richiesta, e il denaro deve restare esatto
-        let m = Meter::new(prezzi(), 100);
+    fn sampling_saves_the_metrics_but_not_the_money() {
+        // this is the distinction of ADR 0005: counting every request on a global counter
+        // costs a lock on every request, and money must stay exact
+        let m = Meter::new(prices(), 100);
         for _ in 0..1_000 {
-            m.registr(
+            m.record(
                 "acme",
-                &forma("costoso"),
+                &shape("expensive"),
                 Usage {
                     input_tokens: 1_000_000,
                     output_tokens: 0,
                 },
-                &Esito::Servito {
+                &Outcome::Served {
                     provider: "a".to_owned(),
-                    prezzo_stimato: false,
+                    price_estimated: false,
                 },
             );
         }
 
         let snap = m.snapshots();
         assert_eq!(snap.len(), 1);
-        // il denaro è esatto: 1000 richieste da 2 500 µUSD ciascuna
+        // money is exact: 1000 requests at 2 500 µUSD each
         assert_eq!(snap[0].spent, 2_500 * 1_000);
-        // le metriche operative sono stimate: 1000 eventi con tasso 100 → 10
+        // operating metrics are estimated: 1000 events at rate 100 → 10
         assert_eq!(snap[0].served, 10);
-        assert_eq!(m.seen(), 1_000, "le richieste viste si contano tutte");
+        assert_eq!(m.seen(), 1_000, "the requests seen are all counted");
     }
 
     #[test]
-    fn un_tasso_di_campionamento_di_uno_significa_esatto() {
-        let m = Meter::new(prezzi(), 1);
+    fn a_sampling_rate_of_one_means_exact() {
+        let m = Meter::new(prices(), 1);
         for _ in 0..50 {
-            m.registr(
+            m.record(
                 "acme",
-                &forma("economico"),
+                &shape("cheap"),
                 Usage::default(),
-                &Esito::Servito {
+                &Outcome::Served {
                     provider: "a".to_owned(),
-                    prezzo_stimato: false,
+                    price_estimated: false,
                 },
             );
         }
@@ -483,43 +483,43 @@ mod tests {
     }
 
     #[test]
-    fn un_tasso_di_zero_significa_contare_tutto_non_niente() {
-        assert_eq!(Meter::new(prezzi(), 0).sample_rate(), 1);
+    fn a_rate_of_zero_means_count_everything_not_nothing() {
+        assert_eq!(Meter::new(prices(), 0).sample_rate(), 1);
     }
 
     #[test]
-    fn una_richiesta_servita_senza_tetto_e_l_allarme_principale() {
+    fn a_request_served_without_the_cap_is_the_main_alarm() {
         let m = meter();
-        assert_eq!(m.servite_senza_tetto(), 0, "su zero il tetto protegge");
+        assert_eq!(m.served_uncovered(), 0, "at zero the cap protects");
 
-        m.registr_senza_tetto("acme");
-        m.registr_senza_tetto("beta");
+        m.record_uncovered("acme");
+        m.record_uncovered("beta");
 
-        assert_eq!(m.servite_senza_tetto(), 2);
-        assert_eq!(m.snapshot_di("acme").map(|s| s.senza_tetto), Some(1));
+        assert_eq!(m.served_uncovered(), 2);
+        assert_eq!(m.snapshot_for("acme").map(|s| s.uncovered), Some(1));
     }
 
     #[test]
-    fn i_rifiuti_per_tetto_si_contono_ma_non_spendono() {
+    fn rejections_by_the_cap_are_counted_but_do_not_spend() {
         let m = meter();
-        m.registr_tetto_negato("acme");
-        m.registr_tetto_negato("acme");
+        m.record_budget_denied("acme");
+        m.record_budget_denied("acme");
         let snap = m.snapshots();
         assert_eq!(snap[0].budget_denied, 2);
         assert_eq!(
             snap[0].spent, 0,
-            "un rifiuto non costa nulla: nessun provider è stato chiamato"
+            "a rejection costs nothing: no provider was called"
         );
     }
 
     #[test]
-    fn i_fallimenti_si_contono_e_spentono_zero() {
+    fn failures_are_counted_and_spend_zero() {
         let m = meter();
-        m.registr(
+        m.record(
             "acme",
-            &forma("costoso"),
+            &shape("expensive"),
             Usage::default(),
-            &Esito::Fallito {
+            &Outcome::Failed {
                 provider: "a".to_owned(),
             },
         );
@@ -529,10 +529,10 @@ mod tests {
     }
 
     #[test]
-    fn i_conteggi_appaiono_nelle_snapshot_dopo_il_primo_uso() {
+    fn the_counts_appear_in_the_snapshots_after_the_first_use() {
         let m = meter();
         assert_eq!(m.snapshots().len(), 0);
-        m.registr_tetto_negato("nuovo");
+        m.record_budget_denied("new");
         assert_eq!(m.snapshots().len(), 1);
     }
 }

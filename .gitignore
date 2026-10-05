@@ -1,7 +1,7 @@
-# Ignora solo ciò che è rumore per questo progetto.
-# I template comuni vivono in harness/template/shared/.gitignore e vengono uniti a questo.
+# Only ignores what is noise for this project.
+# The shared templates live in harness/template/shared/.gitignore and are merged into this one.
 
-# --- segreti: la regola è "non ci devono essere", ma il pattern resta ---
+# --- secrets: the rule is "there must be none", but the pattern stays ---
 .env
 .env.*
 !.env.example
@@ -20,12 +20,12 @@ desktop.ini
 *.swp
 *~
 
-# --- artefatti ---
+# --- artifacts ---
 /tmp/
 /logs/
 *.log
 coverage/
 node_modules/
 vendor/
-# binari e artefatti
+# binaries and artifacts
 /target/

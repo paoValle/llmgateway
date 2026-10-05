@@ -1,13 +1,13 @@
-//! `llmgateway` — un proxy che mette tra te e i provider LLM quattro cose che il
-//! provider non fa: sapere quanto costa, non superare il tetto, non cadere quando un
-//! provider cade, e dirti quando è caduto.
+//! `llmgateway` — a proxy that puts four things between you and the LLM providers
+//! that the provider does not do: knowing what things cost, not exceeding the cap,
+//! not falling over when a provider falls over, and telling you when it did.
 //!
-//! Lo stato è in memoria e il progetto è pensato per **una sola istanza**: vedi
-//! [`docs/adr/0006-stato-in-memoria.md`](../docs/adr/0006-stato-in-memoria.md).
+//! The state is in memory and the project is meant for **a single instance**: see
+//! [`docs/adr/0006-state-in-memory.md`](../docs/adr/0006-state-in-memory.md).
 
 pub mod auth;
 pub mod budget;
-/// Quanto costa: micro-dollari interi, prezzi per modello.
+/// What things cost: integer micro-dollars, prices per model.
 pub mod config;
 pub mod gateway;
 pub mod meter;

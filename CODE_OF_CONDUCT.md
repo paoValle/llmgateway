@@ -1,24 +1,24 @@
 # Code of Conduct
 
-Versione breve, in italiano.
+Short version.
 
-## Aspettative
+## Expectations
 
-- si discute dell'idea, non della persona
-- si dà il contesto prima del giudizio
-- una review che demolisce è una review che non serve a nessuno
+- discuss the idea, not the person
+- give the context before the judgment
+- a review that demolishes is a review that serves nobody
 
-## Non accetto
+## I do not accept
 
-Insulti, discriminazioni, intimidazione, spam.
+Insults, discrimination, intimidation, spam.
 
-## Come segnalare
+## How to report
 
-Issue pubblica, o mail. Vedi [SECURITY.md](SECURITY.md).
-Risposta entro una settimana.
+Public issue, or email. See [SECURITY.md](SECURITY.md).
+Answer within a week.
 
-## Conseguenze
+## Consequences
 
-Commenti offensivi: rimossi. Repeatedi comportamenti: blocco.
+Offensive comments: removed. Repeated behavior: block.
 
-Enforcement: Paolo Valletta, maintainer di questa repo.
+Enforcement: Paolo Valletta, maintainer of this repo.

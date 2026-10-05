@@ -1,18 +1,18 @@
 # Changelog
 
-Formato [Keep a Changelog](https://keepachangelog.com/it/1.1.0/),
-versioni [SemVer](https://semver.org/lang/it/).
+Format [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+versioning [SemVer](https://semver.org/).
 
-## [Non rilasciato]
+## [Unreleased]
 
-### Aggiunto
-### Modificato
-### Corretto
-### Rimosso
+### Added
+### Changed
+### Fixed
+### Removed
 
 <!--
-Quando esce una versione:
+When a version comes out:
 ## [0.1.0] - 2026-03-14
-### Aggiunto
-- prima cosa che vede l'utente
+### Added
+- first thing the user sees
 -->

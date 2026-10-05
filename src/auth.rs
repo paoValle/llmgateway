@@ -1,155 +1,154 @@
-//! Chi può usare il gateway.
+//! Who may use the gateway.
 //!
-//! Una tabella costruita una volta all'avvio e letta senza lock: il numero di tenant
-//! è noto dalla configurazione, quindi la mappa non cresce a runtime e la risposta a
-//! "di chi è questa richiesta" è una ricerca in tabella hash, non una scansione.
+//! A table built once at startup and read without a lock: the number of tenants is
+//! known from the configuration, so the map does not grow at runtime and the answer to
+//! "whose request is this" is a hash table lookup, not a scan.
 //!
-//! Sul confronto delle chiavi c'è una scelta che va detta. Una `HashMap` compara la
-//! chiave in un colpo solo (`memcmp`), non byte per byte in un ciclo che osservabile
-//! dal lato della rete: il timing side channel classico si attacca a un confronto
-//! byte-per-byte che rallenta quando il prefisso è indovinato, e qui non c'è niente
-//! di quel genere da guardare. Però la chiavi in configurazione sono **hash**, non
-//! le chiavi: chi legge il file di configurazione non può usarle, e il file resta
-//! committabile.
+//! On key comparison there is a choice that must be stated. A `HashMap` compares the key
+//! in one shot (`memcmp`), not byte by byte in a loop observable from the network side:
+//! the classic timing side channel attaches to a byte-per-byte comparison that slows
+//! down when the prefix is guessed, and there is nothing of that kind to watch here.
+//! But the keys in the configuration are **hashes**, not the keys: whoever reads the
+//! configuration file cannot use them, and the file stays committable.
 //!
-//! Il tempo di risposta del confronto non viene comunque esposto in modo utile:
-//! l'unica cosa che un assaltante misura è `401` contro `200`, e il `200` lo vede solo
-//! se ha la chiave.
+//! The response time of the comparison is not exposed in a useful way anyway: the only
+//! thing an attacker measures is `401` versus `200`, and they only see the `200` if they
+//! have the key.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-/// Perché una richiesta non è autenticata.
+/// Why a request is not authenticated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErroreAuth {
-    /// Non è arrivata nessuna chiave.
-    Mancata,
-    /// La chiave c'è ma non corrisponde a nessun tenant.
-    Sconosciuta,
-    /// La chiave c'è ma è vuota: quasi sempre un bug di configurazione.
-    Vuoto,
+pub enum AuthError {
+    /// No key arrived.
+    Missing,
+    /// The key is there but does not match any tenant.
+    Unknown,
+    /// The key is there but is empty: almost always a configuration bug.
+    Empty,
 }
 
-impl std::fmt::Display for ErroreAuth {
+impl std::fmt::Display for AuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Mancata => f.write_str("nessuna chiave API"),
-            Self::Sconosciuta => f.write_str("chiave API sconosciuta"),
-            Self::Vuoto => f.write_str("chiave API vuota"),
+            Self::Missing => f.write_str("no API key"),
+            Self::Unknown => f.write_str("unknown API key"),
+            Self::Empty => f.write_str("empty API key"),
         }
     }
 }
 
-impl std::error::Error for ErroreAuth {}
+impl std::error::Error for AuthError {}
 
-/// Un tenant riconosciuto.
+/// A recognized tenant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tenant {
-    /// Identificatore: compare nelle metriche e nei log.
+    /// Identifier: it appears in metrics and logs.
     pub id: String,
 }
 
-/// L'insieme dei tenant che possono usare il gateway.
+/// The set of tenants that may use the gateway.
 #[derive(Debug, Clone)]
-pub struct Autenticatore {
-    /// hash della chiave → tenant. Costruita una volta, poi solo letta.
-    per_chiave: BTreeMap<String, Tenant>,
-    /// tenant → modelli autorizzati. Vuoto = tutti.
-    modelli: BTreeMap<String, BTreeSet<String>>,
+pub struct Authenticator {
+    /// key hash → tenant. Built once, then only read.
+    by_key: BTreeMap<String, Tenant>,
+    /// tenant → allowed models. Empty = all.
+    models: BTreeMap<String, BTreeSet<String>>,
 }
 
-impl Autenticatore {
-    /// Costruisce da `tenant_id → chiave` e `tenant_id → modelli`.
+impl Authenticator {
+    /// Builds from `tenant_id → key` and `tenant_id → models`.
     ///
-    /// La chiave resta solo come hash: l'`Autenticatore` non la conserva, e quindi
-    /// non può finire in un dump di memoria né in un log di debug.
+    /// The key stays only as a hash: the `Authenticator` does not keep it, so it can
+    /// never end up in a memory dump or in a debug log.
     #[must_use]
-    pub fn new(chiavi: &[(String, String)], modelli: &[(String, BTreeSet<String>)]) -> Self {
+    pub fn new(keys: &[(String, String)], models: &[(String, BTreeSet<String>)]) -> Self {
         Self {
-            per_chiave: chiavi
+            by_key: keys
                 .iter()
-                .map(|(tenant, chiave)| (hash_chiave(chiave), Tenant { id: tenant.clone() }))
+                .map(|(tenant, key)| (hash_key(key), Tenant { id: tenant.clone() }))
                 .collect(),
-            modelli: modelli.iter().cloned().collect(),
+            models: models.iter().cloned().collect(),
         }
     }
 
-    /// Il tenant di una chiave, o l'errore.
-    pub fn identifica(&self, chiave: Option<&str>) -> Result<Tenant, ErroreAuth> {
-        let chiave = chiave.ok_or(ErroreAuth::Mancata)?;
-        if chiave.trim().is_empty() {
-            return Err(ErroreAuth::Vuoto);
+    /// The tenant of a key, or the error.
+    pub fn identify(&self, key: Option<&str>) -> Result<Tenant, AuthError> {
+        let key = key.ok_or(AuthError::Missing)?;
+        if key.trim().is_empty() {
+            return Err(AuthError::Empty);
         }
-        self.per_chiave
-            .get(&hash_chiave(chiave))
+        self.by_key
+            .get(&hash_key(key))
             .cloned()
-            .ok_or(ErroreAuth::Sconosciuta)
+            .ok_or(AuthError::Unknown)
     }
 
-    /// `true` se il tenant può usare quel modello.
+    /// `true` if the tenant may use that model.
     ///
-    /// Un tenant senza lista esplicita può usare tutto: il default è aperto, e la
-    /// chiusura si dichiara esplicitamente per tenant. Il contrario — default chiuso
-    /// con lista vuota — renderebbe ogni `[[tenants]]` inutile senza che lo si noti.
+    /// A tenant without an explicit list may use everything: the default is open, and
+    /// closure is declared explicitly per tenant. The opposite — a closed default with
+    /// an empty list — would make every `[[tenants]]` useless without anyone noticing.
     #[must_use]
-    pub fn puo_usare(&self, tenant: &str, model: &str) -> bool {
-        match self.modelli.get(tenant) {
+    pub fn can_use(&self, tenant: &str, model: &str) -> bool {
+        match self.models.get(tenant) {
             None => true,
-            Some(modelli) if modelli.is_empty() => true,
-            Some(modelli) => modelli.contains(model),
+            Some(models) if models.is_empty() => true,
+            Some(models) => models.contains(model),
         }
     }
 
-    /// Quanti tenant sono riconosciuti.
+    /// How many tenants are recognized.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.per_chiave.len()
+        self.by_key.len()
     }
 
-    /// `true` se nessun tenant può usare il gateway.
+    /// `true` if no tenant may use the gateway.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.per_chiave.is_empty()
+        self.by_key.is_empty()
     }
 }
 
-/// L'hash di una chiave API.
+/// The hash of an API key.
 ///
-/// SHA-256: qui non si protegge una password da un attaccante che sceglie le chiavi,
-/// si tiene la chiave fuori da un file di configurazione e fuori da un dump. Non è una
-/// funzione di derivazione lenta e non deve esserlo: il gateway deve rispondere in
-/// microsecondi, e l'attacco a rainbow table su una chiave ad alta entropia non
-/// funziona comunque.
+/// SHA-256: this does not protect a password from an attacker who chooses the keys, it
+/// keeps the key out of a configuration file and out of a dump. It is not a slow
+/// derivation function and must not be: the gateway has to answer in microseconds, and
+/// a rainbow table attack on a high-entropy key does not work anyway.
 #[must_use]
-pub fn hash_chiave(chiave: &str) -> String {
+pub fn hash_key(key: &str) -> String {
     let mut h = Sha256::new();
-    h.update(chiave.as_bytes());
+    h.update(key.as_bytes());
     format!("{:x}", h.finalize())
 }
 
-/// Come generare l'hash di una chiave, per scrivere la configurazione.
+/// How to generate the hash of a key, to write the configuration.
 ///
-/// Sta qui e non in un binario separato perché è una riga: la comodità conta più
-/// della modularità, e il modo sbagliato (le chiavi in chiaro) si vede nel diff.
+/// It lives here and not in a separate binary because it is one line: convenience
+/// counts more than modularity, and the wrong way (plain-text keys) is visible in the
+/// diff.
 #[must_use]
-pub fn genera_hash(chiave: &str) -> String {
-    hash_chiave(chiave)
+pub fn generate_hash(key: &str) -> String {
+    hash_key(key)
 }
 
-/// Il tipo della chiave letta dalla configurazione: gli hash, non le chiavi.
+/// The type of the key read from the configuration: the hashes, not the keys.
 ///
-/// Esiste come tipo per non confonderli: una `String` è una `String`, e in una
-/// configurazione la differenza fra "questa è la chiave" e "questo è il suo hash" è
-/// tutto.
-pub type HashChiave = Arc<str>;
+/// It exists as a type so they are not confused: a `String` is a `String`, and in a
+/// configuration the difference between "this is the key" and "this is its hash" is
+/// everything.
+pub type KeyHash = Arc<str>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn modelli() -> Vec<(String, BTreeSet<String>)> {
+    fn models() -> Vec<(String, BTreeSet<String>)> {
         vec![
             (
                 "acme".to_owned(),
@@ -159,110 +158,105 @@ mod tests {
         ]
     }
 
-    fn chiavi() -> Vec<(String, String)> {
+    fn keys() -> Vec<(String, String)> {
         vec![
             ("acme".to_owned(), "sk-acme".to_owned()),
             ("beta".to_owned(), "sk-beta".to_owned()),
         ]
     }
 
-    fn a() -> Autenticatore {
-        Autenticatore::new(&chiavi(), &modelli())
+    fn auth() -> Authenticator {
+        Authenticator::new(&keys(), &models())
     }
 
     #[test]
-    fn una_chiave_giusta_trova_il_suo_tenant() {
+    fn a_correct_key_finds_its_tenant() {
         assert_eq!(
-            a().identifica(Some("sk-acme")).map(|t| t.id).ok(),
+            auth().identify(Some("sk-acme")).map(|t| t.id).ok(),
             Some("acme".to_owned())
         );
         assert_eq!(
-            a().identifica(Some("sk-beta")).map(|t| t.id).ok(),
+            auth().identify(Some("sk-beta")).map(|t| t.id).ok(),
             Some("beta".to_owned())
         );
     }
 
     #[test]
-    fn nessuna_chiave_e_una_chiave_sconosciuta_sono_casi_diversi() {
-        // la differenza è nel messaggio: a chi sbaglia interessa sapere se ha
-        // dimenticato la chiave o se quella è sbagliata
-        assert_eq!(a().identifica(None), Err(ErroreAuth::Mancata));
-        assert_eq!(
-            a().identifica(Some("sk-nessuno")),
-            Err(ErroreAuth::Sconosciuta)
-        );
-        assert_eq!(a().identifica(Some("   ")), Err(ErroreAuth::Vuoto));
+    fn no_key_and_an_unknown_key_are_different_cases() {
+        // the difference is in the message: whoever gets it wrong cares about knowing
+        // whether they forgot the key or whether that one is wrong
+        assert_eq!(auth().identify(None), Err(AuthError::Missing));
+        assert_eq!(auth().identify(Some("sk-nobody")), Err(AuthError::Unknown));
+        assert_eq!(auth().identify(Some("   ")), Err(AuthError::Empty));
     }
 
     #[test]
-    fn una_chiave_vuota_e_distinguibile_perche_di_una_vuota_e_un_bug() {
-        assert_eq!(a().identifica(Some("")), Err(ErroreAuth::Vuoto));
+    fn an_empty_key_is_distinguishable_because_an_empty_one_is_a_bug() {
+        assert_eq!(auth().identify(Some("")), Err(AuthError::Empty));
     }
 
     #[test]
-    fn l_autenticatore_non_conserva_la_chiave_in_chiaro() {
-        let a = a();
-        let testo = format!("{a:?}");
+    fn the_authenticator_does_not_keep_the_key_in_the_clear() {
+        let a = auth();
+        let text = format!("{a:?}");
         assert!(
-            !testo.contains("sk-acme"),
-            "la chiave non deve finire in un Debug"
+            !text.contains("sk-acme"),
+            "the key must not end up in a Debug"
         );
-        assert!(testo.contains(&hash_chiave("sk-acme")));
+        assert!(text.contains(&hash_key("sk-acme")));
     }
 
     #[test]
-    fn un_tenant_con_lista_puova_solo_quel_modello() {
-        assert!(a().puo_usare("acme", "gpt-4o-mini"));
+    fn a_tenant_with_a_list_can_only_use_that_model() {
+        assert!(auth().can_use("acme", "gpt-4o-mini"));
         assert!(
-            !a().puo_usare("acme", "gpt-4o"),
-            "l'elenco è una restrizione, non un suggerimento"
+            !auth().can_use("acme", "gpt-4o"),
+            "the list is a restriction, not a suggestion"
         );
     }
 
     #[test]
-    fn un_tenant_senza_lista_puova_tutto() {
-        assert!(a().puo_usare("beta", "qualsiasi-cosa"));
+    fn a_tenant_without_a_list_can_use_everything() {
+        assert!(auth().can_use("beta", "anything-at-all"));
     }
 
     #[test]
-    fn un_tenant_sconosciuto_nel_router_ha_un_default_dichiarato() {
-        // un tenant che non è nella configurazione non deve poter fare nulla: qui si
-        // risponde "può tutto" perché l'autenticazione lo esclude già a monte
-        assert!(a().puo_usare("inesistente", "qualsiasi"));
+    fn an_unknown_tenant_in_the_router_has_a_declared_default() {
+        // a tenant that is not in the configuration must not be able to do anything:
+        // here the answer is "can do everything" because authentication already
+        // excludes it upstream
+        assert!(auth().can_use("nonexistent", "anything"));
     }
 
     #[test]
-    fn due_chiavi_identiche_danno_un_conflitto_visibile_e_non_silenzioso() {
-        // due tenant con la stessa chiave è una configurazione rotta: una BTreeMap
-        // tiene l'ultimo senza dire niente, e l'amministratore non lo saprebbe
-        let a = Autenticatore::new(
+    fn two_identical_keys_give_a_visible_and_not_silent_conflict() {
+        // two tenants with the same key is a broken configuration: a BTreeMap keeps the
+        // last one without saying anything, and the administrator would not know
+        let a = Authenticator::new(
             &[
-                ("a".to_owned(), "stessa".to_owned()),
-                ("b".to_owned(), "stessa".to_owned()),
+                ("a".to_owned(), "same".to_owned()),
+                ("b".to_owned(), "same".to_owned()),
             ],
             &[],
         );
-        assert_eq!(a.len(), 1, "la seconda sovrascrive la prima");
+        assert_eq!(a.len(), 1, "the second overwrites the first");
         assert_eq!(
-            a.identifica(Some("stessa")).map(|t| t.id).ok(),
+            a.identify(Some("same")).map(|t| t.id).ok(),
             Some("b".to_owned())
         );
     }
 
     #[test]
-    fn un_autenticatore_vuoto_non_autentica_nessuno() {
-        let vuoto = Autenticatore::new(&[], &[]);
-        assert!(vuoto.is_empty());
-        assert_eq!(
-            vuoto.identifica(Some("qualsiasi")),
-            Err(ErroreAuth::Sconosciuta)
-        );
+    fn an_empty_authenticator_authenticates_nobody() {
+        let empty = Authenticator::new(&[], &[]);
+        assert!(empty.is_empty());
+        assert_eq!(empty.identify(Some("any")), Err(AuthError::Unknown));
     }
 
     #[test]
-    fn l_hash_e_stabile_e_diverso_per_chiavi_diverse() {
-        assert_eq!(hash_chiave("sk-acme"), hash_chiave("sk-acme"));
-        assert_ne!(hash_chiave("sk-acme"), hash_chiave("sk-beta"));
-        assert_eq!(hash_chiave("sk-acme").len(), 64, "SHA-256 in esadecimale");
+    fn the_hash_is_stable_and_different_for_different_keys() {
+        assert_eq!(hash_key("sk-acme"), hash_key("sk-acme"));
+        assert_ne!(hash_key("sk-acme"), hash_key("sk-beta"));
+        assert_eq!(hash_key("sk-acme").len(), 64, "SHA-256 in hexadecimal");
     }
 }

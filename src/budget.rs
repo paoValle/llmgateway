@@ -1,39 +1,39 @@
-//! Il tetto per tenant: prenotazione, saldo, e cambio di mese.
+//! The per-tenant cap: reservation, settlement, and month rollover.
 //!
-//! Come in `agentloop`, il meccanismo è **prenota → salda**: si blocca una stima
-//! prima di chiamare il provider, e si libera la differenza quando arriva il conto
-//! vero. Un tetto che si verifica dopo protegge la richiesta precedente.
+//! As in `agentloop`, the mechanism is **reserve → settle**: an estimate is locked
+//! before calling the provider, and the difference is released when the real bill
+//! arrives. A cap that is checked afterwards protects the previous request.
 //!
-//! Il lock è **per tenant**, non globale. Un `Mutex` unico su tutti i contatori
-//! renderebbe il gateway single-threaded proprio sul percorso critico: un tenant
-//! che paga tanto bloccherebbe la prenotazione di tutti gli altri. Ogni tenant ha
-//! il suo, e due tenant non contendono mai.
+//! The lock is **per tenant**, not global. A single `Mutex` over all counters would make
+//! the gateway single-threaded exactly on the critical path: one tenant paying a lot
+//! would block the reservation of all the others. Every tenant has its own, and two
+//! tenants never contend.
 //!
-//! Il cambio di mese è il punto delicato: a mezzanotte il contatore riparte, e una
-//! prenotazione aperta nel mese precedente non deve più essere saldata contro il
-//! nuovo. Qui la prenotazione porta con sé la finestra in cui è nata.
+//! The month rollover is the delicate point: at midnight the counter restarts, and a
+//! reservation opened in the previous month must no longer be settled against the new
+//! one. Here the reservation carries the window it was born in.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::pricing::MicroUsd;
 
-/// Un mese di un anno, come chiave finestra.
+/// A month of a year, as a window key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Month {
-    /// Anno.
+    /// Year.
     pub year: i64,
-    /// Mese da 1 a 12.
+    /// Month from 1 to 12.
     pub month: u32,
 }
 
 impl Month {
-    /// Il mese in cui cade un istante Unix, in millisecondi.
+    /// The month a Unix instant falls in, in milliseconds.
     ///
-    /// Calcolato con l'algoritmo di Howard Hinnant per la data civile, che è
-    /// esatto per qualunque data gregoriana e non ha tabelle né dipendenze. Il
-    /// secondo è UTC: un tetto mensile che cambiasse a seconda del fuso orario
-    /// del server sarebbe una sorpresa per chi lo amministra.
+    /// Computed with Howard Hinnant's civil date algorithm, which is exact for any
+    /// Gregorian date and has no tables and no dependencies. The second is UTC: a
+    /// monthly cap that changed depending on the server time zone would be a surprise
+    /// for whoever administers it.
     #[must_use]
     pub fn of(epoch_ms: i64) -> Self {
         let days = epoch_ms.div_euclid(86_400_000);
@@ -42,10 +42,10 @@ impl Month {
     }
 }
 
-/// Data civile da un conteggio di giorni dall'epoca (algoritmo di Hinnant).
+/// Civil date from a count of days since the epoch (Hinnant's algorithm).
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    // i tre cast a u32 qui sotto sono sicuri per costruzione: l'algoritmo produce
-    // un giorno in [1, 31] e un mese in [1, 12], quindi non c'è segno da perdere.
+    // the three u32 casts below are safe by construction: the algorithm produces a day
+    // in [1, 31] and a month in [1, 12], so there is no sign to lose.
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     fn narrow(v: i64) -> u32 {
         u32::try_from(v).unwrap_or(0)
@@ -64,14 +64,14 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year, month, day)
 }
 
-/// Perché una prenotazione è stata rifiutata.
+/// Why a reservation was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BudgetExceeded {
-    /// Quanto serviva, in `µUSD`.
+    /// How much was needed, in `µUSD`.
     pub requested: MicroUsd,
-    /// Quanto c'era, in `µUSD`.
+    /// How much was there, in `µUSD`.
     pub available: MicroUsd,
-    /// Il tetto del tenant.
+    /// The tenant cap.
     pub limit: MicroUsd,
 }
 
@@ -79,7 +79,7 @@ impl std::fmt::Display for BudgetExceeded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "budget esaurito: servono {} µUSD, disponibili {} (tetto {})",
+            "budget exhausted: {} µUSD needed, {} available (cap {})",
             self.requested, self.available, self.limit
         )
     }
@@ -87,17 +87,17 @@ impl std::fmt::Display for BudgetExceeded {
 
 impl std::error::Error for BudgetExceeded {}
 
-/// Perché una prenotazione è fallita.
+/// Why a reservation failed.
 ///
-/// Due cause, e non si possono confondere: una è **economica** e va restituita al
-/// client come `429`, l'altra è uno **stato interno compromesso** e va segnalata come
-/// un problema del gateway. Un unico tipo di errore che le mescolasse porterebbe a
-/// rispondere `429` a un bug.
+/// Two causes, and they must not be confused: one is **economic** and goes back to the
+/// client as `429`, the other is a **compromised internal state** and must be reported
+/// as a gateway problem. A single error type mixing them would lead to answering `429`
+/// to a bug.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReserveError {
-    /// Il tetto non copre la stima. Va al client.
+    /// The cap does not cover the estimate. It goes to the client.
     Exceeded(BudgetExceeded),
-    /// Il lock è avvelenato da un panic. È un problema del gateway, non del tenant.
+    /// The lock is poisoned by a panic. It is a gateway problem, not the tenant's.
     State(BudgetPoisoned),
 }
 
@@ -112,11 +112,11 @@ impl std::fmt::Display for ReserveError {
 
 impl std::error::Error for ReserveError {}
 
-/// Una prenotazione di denaro.
+/// A reservation of money.
 ///
-/// Va **sempre** saldata o liberata. Una prenotazione dimenticata blocca budget
-/// per il resto della finestra: per questo `Budget` espone `open_reservations` e il
-/// gateway lo registra.
+/// It must **always** be settled or released. A forgotten reservation locks budget for
+/// the rest of the window: that is why `Budget` exposes `open_reservations` and the
+/// gateway records it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reservation {
     id: u64,
@@ -124,7 +124,7 @@ pub struct Reservation {
     window: Month,
 }
 
-/// Lo stato interno di un tenant, protetto dal suo lock.
+/// The internal state of a tenant, protected by its lock.
 #[derive(Debug, Clone, Copy)]
 struct State {
     window: Month,
@@ -133,7 +133,7 @@ struct State {
     next_id: u64,
 }
 
-/// Il tetto di un tenant.
+/// The cap of a tenant.
 #[derive(Debug)]
 pub struct TenantBudget {
     tenant_id: String,
@@ -142,8 +142,8 @@ pub struct TenantBudget {
 }
 
 impl TenantBudget {
-    /// Crea un tetto. `window` è la finestra corrente: chi lo crea decide da dove
-    /// si parte, e i test ne hanno bisogno.
+    /// Creates a cap. `window` is the current window: whoever creates it decides where
+    /// it starts, and the tests need that.
     #[must_use]
     pub fn new(tenant_id: impl Into<String>, limit: MicroUsd, window: Month) -> Self {
         Self {
@@ -158,46 +158,47 @@ impl TenantBudget {
         }
     }
 
-    /// L'identificatore del tenant.
+    /// The tenant identifier.
     #[must_use]
     pub fn tenant_id(&self) -> &str {
         &self.tenant_id
     }
 
-    /// Il tetto della finestra.
+    /// The cap of the window.
     #[must_use]
     pub fn limit(&self) -> MicroUsd {
         self.limit
     }
 
-    /// Denaro speso nella finestra corrente.
+    /// Money spent in the current window.
     #[must_use]
     pub fn spent(&self, now_ms: i64) -> MicroUsd {
-        self.contabile(now_ms).map_or(0, |s| s.spent)
+        self.read_state(now_ms).map_or(0, |s| s.spent)
     }
 
-    /// Denaro prenotato e non ancora saldato.
+    /// Money reserved and not yet settled.
     #[must_use]
     pub fn held(&self, now_ms: i64) -> MicroUsd {
-        self.contabile(now_ms).map_or(0, |s| s.held)
+        self.read_state(now_ms).map_or(0, |s| s.held)
     }
 
-    /// Quanto si può ancora prenotare.
+    /// How much can still be reserved.
     #[must_use]
     pub fn available(&self, now_ms: i64) -> MicroUsd {
-        self.contabile(now_ms)
+        self.read_state(now_ms)
             .map_or(0, |s| self.limit - s.spent - s.held)
     }
 
-    /// Quante prenotazioni sono aperte. Se resta qualcosa a fine richiesta, è un bug.
+    /// How many reservations are open. If something is left at the end of a request,
+    /// it is a bug.
     #[must_use]
     pub fn open_reservations(&self, now_ms: i64) -> u64 {
-        self.contabile(now_ms).map_or(0, |_| {
+        self.read_state(now_ms).map_or(0, |_| {
             self.state.lock().map_or(0, |s| s.next_id.saturating_sub(1))
         })
     }
 
-    /// Prenota `amount`, o fallisce **prima** che qualcuno spenda.
+    /// Reserves `amount`, or fails **before** anyone spends.
     pub fn reserve(&self, amount: MicroUsd, now_ms: i64) -> Result<Reservation, ReserveError> {
         let mut s = self.lock(now_ms).map_err(ReserveError::State)?;
         let available = self.limit - s.spent - s.held;
@@ -218,11 +219,11 @@ impl TenantBudget {
         Ok(reservation)
     }
 
-    /// Salda con il consumo reale e libera la differenza.
+    /// Settles with the real consumption and releases the difference.
     ///
-    /// Se la prenotazione appartiene a una **finestra precedente**, è un no-op: il
-    /// mese è cambiato, il contatore è ripartito da zero, e sommare un debito vecchio
-    /// su un contatore nuovo farebbe sparire denaro che è già stato speso.
+    /// If the reservation belongs to a **previous window**, it is a no-op: the month
+    /// changed, the counter restarted from zero, and adding an old debt onto a new
+    /// counter would make money that has already been spent disappear.
     pub fn settle(&self, reservation: Reservation, actual: MicroUsd, now_ms: i64) {
         if let Ok(mut s) = self.lock(now_ms) {
             if s.window != reservation.window {
@@ -233,7 +234,7 @@ impl TenantBudget {
         }
     }
 
-    /// Rilascia la prenotazione: la stima si è rivelata sovrastimata.
+    /// Releases the reservation: the estimate turned out too high.
     pub fn release(&self, reservation: Reservation, now_ms: i64) {
         if let Ok(mut s) = self.lock(now_ms) {
             if s.window != reservation.window {
@@ -243,7 +244,7 @@ impl TenantBudget {
         }
     }
 
-    /// Il dettaglio per `/metrics` e per i log.
+    /// The detail for `/metrics` and for logs.
     #[must_use]
     pub fn snapshot(&self, now_ms: i64) -> Option<Snapshot> {
         let s = self.lock(now_ms).ok()?;
@@ -257,29 +258,29 @@ impl TenantBudget {
         })
     }
 
-    /// Avvelena il lock, come farebbe un `panic` in un altro thread.
+    /// Poisons the lock, as a `panic` in another thread would.
     ///
-    /// Esiste per una sola ragione: verificare che un tetto il cui stato non è
-    /// leggibile **non impedisca comunque di servire la richiesta** (ADR 0004). Non
-    /// c'è un modo onesto di provocare un `panic` dentro gli altri metodi, e senza
-    /// questo-hook il test più importante del progetto non si può scrivere.
+    /// It exists for one reason only: to verify that a cap whose state is not readable
+    /// **still does not prevent serving the request** (ADR 0004). There is no honest way
+    /// to provoke a `panic` inside the other methods, and without this hook the most
+    /// important test of the project cannot be written.
     ///
-    /// Ritorna `true` se il lock è stato avvelenato.
+    /// Returns `true` if the lock was poisoned.
     #[doc(hidden)]
-    pub fn avvelena(&self) -> bool {
+    pub fn poison(&self) -> bool {
         let Ok(_guard) = self.state.lock() else {
-            return false; // già avvelenato: niente da fare
+            return false; // already poisoned: nothing to do
         };
-        std::panic::panic_any(Avvelenamento);
+        std::panic::panic_any(PoisonMarker);
     }
 
-    /// Prende il lock e azzera i contatori se il mese è cambiato.
+    /// Takes the lock and resets the counters if the month changed.
     fn lock(&self, now_ms: i64) -> Result<std::sync::MutexGuard<'_, State>, BudgetPoisoned> {
         let mut s = self.state.lock().map_err(|_| BudgetPoisoned)?;
-        let corrente = Month::of(now_ms);
-        if s.window != corrente {
+        let current = Month::of(now_ms);
+        if s.window != current {
             *s = State {
-                window: corrente,
+                window: current,
                 spent: 0,
                 held: 0,
                 next_id: 1,
@@ -288,99 +289,99 @@ impl TenantBudget {
         Ok(s)
     }
 
-    /// Come [`Self::lock`] ma senza toccare i contatori: per le letture.
-    fn contabile(&self, now_ms: i64) -> Option<State> {
+    /// Like [`Self::lock`] but without touching the counters: for reads.
+    fn read_state(&self, now_ms: i64) -> Option<State> {
         let s = self.lock(now_ms).ok()?;
         Some(*s)
     }
 }
 
-/// Il lock è stato avvelenato da un panic in un altro thread.
+/// The lock was poisoned by a panic in another thread.
 ///
-/// Non è recuperabile in modo utile: se è successo, lo stato è in parte
-/// incoerente e la cosa giusta è notarlo e rifiutare, non fingere.
+/// It is not recoverable in a useful way: if it happened, the state is partly
+/// inconsistent and the right thing is to notice it and refuse, not to pretend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BudgetPoisoned;
 
 impl std::fmt::Display for BudgetPoisoned {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("stato del budget non leggibile: un thread è andato in panic tenendo il lock")
+        f.write_str("budget state not readable: a thread panicked while holding the lock")
     }
 }
 
 impl std::error::Error for BudgetPoisoned {}
 
-/// Il tipo con cui si avvelena il lock. Non viene mai restituito a nessuno.
+/// The type used to poison the lock. It is never returned to anyone.
 #[doc(hidden)]
 #[derive(Debug)]
-pub struct Avvelenamento;
+pub struct PoisonMarker;
 
-/// Una fotografia del tetto di un tenant.
+/// A snapshot of a tenant cap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
-    /// Chi.
+    /// Who.
     pub tenant_id: String,
-    /// In che mese.
+    /// In which month.
     pub window: Month,
-    /// Tetto.
+    /// Cap.
     pub limit: MicroUsd,
-    /// Speso.
+    /// Spent.
     pub spent: MicroUsd,
-    /// Prenotato e non saldato.
+    /// Reserved and not settled.
     pub held: MicroUsd,
-    /// Ancora prenotabile.
+    /// Still reservable.
     pub available: MicroUsd,
 }
 
-/// Tutti i tenant, in un solo posto.
+/// All the tenants, in one place.
 #[derive(Debug, Default)]
 pub struct BudgetRegistry {
     budgets: RwLock<BTreeMap<String, Arc<TenantBudget>>>,
 }
 
 impl BudgetRegistry {
-    /// Vuoto.
+    /// Empty.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Registra un tetto. Se il tenant esiste già, viene sostituito.
+    /// Registers a cap. If the tenant already exists, it is replaced.
     pub fn insert(&self, budget: TenantBudget, now_ms: i64) -> Arc<TenantBudget> {
         let id = budget.tenant_id().to_owned();
-        let arco = Arc::new(budget);
+        let arc = Arc::new(budget);
         if let Ok(mut b) = self.budgets.write() {
-            b.insert(id, Arc::clone(&arco));
+            b.insert(id, Arc::clone(&arc));
         }
-        // si allinea subito alla finestra corrente: un tetto costruito con una
-        // finestra vecchia deve valere da subito, non alla prima prenotazione
-        let _ = arco.spent(now_ms);
-        arco
+        // it aligns with the current window right away: a cap built with an old window
+        // must count from now, not from the first reservation
+        let _ = arc.spent(now_ms);
+        arc
     }
 
-    /// Il tetto di un tenant, se esiste.
+    /// The cap of a tenant, if it exists.
     #[must_use]
     pub fn get(&self, tenant_id: &str) -> Option<Arc<TenantBudget>> {
         self.budgets.read().ok()?.get(tenant_id).cloned()
     }
 
-    /// Tutti i tenant, per le metriche.
+    /// All the tenants, for the metrics.
     #[must_use]
     pub fn snapshots(&self, now_ms: i64) -> Vec<Snapshot> {
-        let tutti: Vec<Arc<TenantBudget>> = match self.budgets.read() {
+        let all: Vec<Arc<TenantBudget>> = match self.budgets.read() {
             Ok(b) => b.values().cloned().collect(),
             Err(_) => return Vec::new(),
         };
-        tutti.iter().filter_map(|b| b.snapshot(now_ms)).collect()
+        all.iter().filter_map(|b| b.snapshot(now_ms)).collect()
     }
 
-    /// Quanti tenant sono registrati.
+    /// How many tenants are registered.
     #[must_use]
     pub fn len(&self) -> usize {
         self.budgets.read().map_or(0, |b| b.len())
     }
 
-    /// `true` se non c'è nessun tenant.
+    /// `true` if there is no tenant.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -392,14 +393,14 @@ mod tests {
     use super::*;
 
     const GEN: i64 = 1_767_225_600_000; // 2026-01-01T00:00:00Z
-    const GIORNO: i64 = 86_400_000;
+    const DAY: i64 = 86_400_000;
 
-    fn tetto(limit: MicroUsd) -> TenantBudget {
+    fn cap(limit: MicroUsd) -> TenantBudget {
         TenantBudget::new("acme", limit, Month::of(GEN))
     }
 
     #[test]
-    fn il_mese_si_calcola_in_utc_e_non_nel_fuso_del_server() {
+    fn the_month_is_computed_in_utc_not_in_the_server_timezone() {
         assert_eq!(
             Month::of(GEN),
             Month {
@@ -408,14 +409,14 @@ mod tests {
             }
         );
         assert_eq!(
-            Month::of(GEN + 31 * GIORNO),
+            Month::of(GEN + 31 * DAY),
             Month {
                 year: 2026,
                 month: 2
             }
         );
         assert_eq!(
-            Month::of(GEN + 365 * GIORNO),
+            Month::of(GEN + 365 * DAY),
             Month {
                 year: 2027,
                 month: 1
@@ -424,17 +425,17 @@ mod tests {
     }
 
     #[test]
-    fn il_calcolo_del_mese_rispetta_la_lunghezza_dei_mesi() {
-        // gennaio 2026 ha 31 giorni: il 28 febbraio è 58 giorni dopo il 1 gennaio
+    fn the_month_computation_respects_month_lengths() {
+        // January 2026 has 31 days: February 28 is 58 days after January 1
         assert_eq!(
-            Month::of(GEN + 58 * GIORNO),
+            Month::of(GEN + 58 * DAY),
             Month {
                 year: 2026,
                 month: 2
             }
         );
         assert_eq!(
-            Month::of(GEN + 59 * GIORNO),
+            Month::of(GEN + 59 * DAY),
             Month {
                 year: 2026,
                 month: 3
@@ -443,20 +444,20 @@ mod tests {
     }
 
     #[test]
-    fn il_calcolo_del_mese_rispetta_l_anno_bisestile() {
-        // 2028 è bisestile: il 1 marzo è 790 giorni dopo il 1 gennaio 2026
-        // (365 + 365 + 60, dove 60 = 31 di gennaio + 29 di febbraio)
+    fn the_month_computation_respects_leap_years() {
+        // 2028 is a leap year: March 1 is 790 days after January 1, 2026
+        // (365 + 365 + 60, where 60 = 31 in January + 29 in February)
         assert_eq!(
-            Month::of(GEN + 790 * GIORNO),
+            Month::of(GEN + 790 * DAY),
             Month {
                 year: 2028,
                 month: 3
             }
         );
-        // il giorno prima è ancora febbraio: se il bisestile fosse ignorato,
-        // questo sarebbe già marzo
+        // the day before is still February: if the leap year were ignored,
+        // this would already be March
         assert_eq!(
-            Month::of(GEN + 789 * GIORNO),
+            Month::of(GEN + 789 * DAY),
             Month {
                 year: 2028,
                 month: 2
@@ -465,15 +466,15 @@ mod tests {
     }
 
     #[test]
-    fn il_mese_prima_dell_epoca_non_panorama() {
-        // un orologio sbagliato o un test con timestamp negativi non deve andare in panic
+    fn a_month_before_the_epoch_does_not_panic() {
+        // a wrong clock or a test with negative timestamps must not panic
         assert_eq!(Month::of(-2_208_988_800_000).year, 1900);
     }
 
     #[test]
-    fn una_prenotazione_blocca_il_denaro_fino_al_saldo() {
-        let b = tetto(1_000_000);
-        let r = b.reserve(400_000, GEN).expect("entra");
+    fn a_reservation_locks_the_money_until_settlement() {
+        let b = cap(1_000_000);
+        let r = b.reserve(400_000, GEN).expect("it fits");
         assert_eq!(b.held(GEN), 400_000);
         assert_eq!(b.spent(GEN), 0);
         assert_eq!(b.available(GEN), 600_000);
@@ -485,92 +486,92 @@ mod tests {
     }
 
     #[test]
-    fn superare_il_tetto_fallisce_prima_della_spesa() {
-        let b = tetto(1_000_000);
-        b.reserve(800_000, GEN).expect("entra");
-        let errore = b.reserve(300_000, GEN).expect_err("non entra");
-        let ReserveError::Exceeded(e) = errore else {
-            panic!("un rifiuto per budget, non un problema di stato: {errore:?}");
+    fn going_over_the_cap_fails_before_the_spending() {
+        let b = cap(1_000_000);
+        b.reserve(800_000, GEN).expect("it fits");
+        let error = b.reserve(300_000, GEN).expect_err("it does not fit");
+        let ReserveError::Exceeded(e) = error else {
+            panic!("a budget rejection, not a state problem: {error:?}");
         };
         assert_eq!(e.requested, 300_000);
         assert_eq!(e.available, 200_000);
         assert_eq!(e.limit, 1_000_000);
-        assert_eq!(b.spent(GEN), 0, "il rifiuto non deve muovere denaro");
+        assert_eq!(b.spent(GEN), 0, "the rejection must not move money");
     }
 
     #[test]
-    fn la_stima_sovrastimata_non_brucia_denaro() {
-        let b = tetto(1_000_000);
-        let r = b.reserve(900_000, GEN).expect("entra");
+    fn an_overestimated_reservation_does_not_burn_money() {
+        let b = cap(1_000_000);
+        let r = b.reserve(900_000, GEN).expect("it fits");
         b.settle(r, 1, GEN);
         assert_eq!(b.spent(GEN), 1);
         assert_eq!(b.available(GEN), 999_999);
     }
 
     #[test]
-    fn rilasciare_libera_senza_spendere() {
-        let b = tetto(1_000_000);
-        let r = b.reserve(500_000, GEN).expect("entra");
+    fn releasing_frees_without_spending() {
+        let b = cap(1_000_000);
+        let r = b.reserve(500_000, GEN).expect("it fits");
         b.release(r, GEN);
         assert_eq!(b.held(GEN), 0);
         assert_eq!(b.spent(GEN), 0);
     }
 
     #[test]
-    fn il_cambio_di_mese_azzera_e_libera_le_prenotazioni_vecchie() {
-        let b = tetto(1_000_000);
-        b.reserve(900_000, GEN).expect("entra");
+    fn the_month_rollover_resets_and_frees_the_old_reservations() {
+        let b = cap(1_000_000);
+        b.reserve(900_000, GEN).expect("it fits");
         assert_eq!(b.available(GEN), 100_000);
 
-        // primo giorno del mese dopo
-        let febbraio = GEN + 31 * GIORNO;
-        assert_eq!(b.spent(febbraio), 0);
+        // first day of the following month
+        let february = GEN + 31 * DAY;
+        assert_eq!(b.spent(february), 0);
         assert_eq!(
-            b.held(febbraio),
+            b.held(february),
             0,
-            "la prenotazione di gennaio non blocca febbraio"
+            "the January reservation does not block February"
         );
-        assert_eq!(b.available(febbraio), 1_000_000);
+        assert_eq!(b.available(february), 1_000_000);
     }
 
     #[test]
-    fn una_prenotazione_del_mese_scaduto_non_si_salda_sul_conto_nuovo() {
-        let b = tetto(1_000_000);
-        let r = b.reserve(900_000, GEN).expect("entra");
-        let febbraio = GEN + 31 * GIORNO;
+    fn a_reservation_from_the_elapsed_month_is_not_settled_on_the_new_account() {
+        let b = cap(1_000_000);
+        let r = b.reserve(900_000, GEN).expect("it fits");
+        let february = GEN + 31 * DAY;
 
-        // la richiesta è iniziata in gennaio e finisce in febbraio
-        b.settle(r, 900_000, febbraio);
+        // the request started in January and ends in February
+        b.settle(r, 900_000, february);
         assert_eq!(
-            b.spent(febbraio),
+            b.spent(february),
             0,
-            "il debito di gennaio non può cadere su febbraio"
+            "the January debt cannot fall on February"
         );
-        assert_eq!(b.held(febbraio), 0);
+        assert_eq!(b.held(february), 0);
     }
 
     #[test]
-    fn il_conteggio_delle_prenotazioni_aperte_e_visibile() {
-        let b = tetto(1_000_000);
+    fn the_count_of_open_reservations_is_visible() {
+        let b = cap(1_000_000);
         assert_eq!(b.open_reservations(GEN), 0);
-        let r = b.reserve(1, GEN).expect("entra");
+        let r = b.reserve(1, GEN).expect("it fits");
         assert_eq!(b.open_reservations(GEN), 1);
         b.settle(r, 1, GEN);
-        // il contatore non scende: dire "0 prenotazioni aperte" dopo un saldo
-        // sarebbe falso, la finestra ne ha avute una
+        // the counter does not go down: saying "0 open reservations" after a settlement
+        // would be false, the window has had one
         assert_eq!(b.open_reservations(GEN), 1);
     }
 
     #[test]
-    fn un_tetto_azzerato_all_avvio_non_e_un_tetto_di_sicurezza() {
-        let b = tetto(0);
-        assert!(b.reserve(1, GEN).is_err(), "con tetto zero non si passa");
+    fn a_cap_zeroed_at_startup_is_not_a_safety_cap() {
+        let b = cap(0);
+        assert!(b.reserve(1, GEN).is_err(), "with a zero cap nothing passes");
     }
 
     #[test]
-    fn lo_snapshot_descriva_il_quadro() {
-        let b = tetto(2_000_000);
-        b.reserve(500_000, GEN).expect("entra");
+    fn the_snapshot_describes_the_picture() {
+        let b = cap(2_000_000);
+        b.reserve(500_000, GEN).expect("it fits");
         assert_eq!(
             b.snapshot(GEN),
             Some(Snapshot {
@@ -585,9 +586,9 @@ mod tests {
     }
 
     #[test]
-    fn il_registro_restituisce_lo_stesso_tetto_e_lo_tiene_per_id() {
+    fn the_registry_returns_the_same_cap_and_keeps_it_by_id() {
         let reg = BudgetRegistry::new();
-        let a = reg.insert(tetto(1_000_000), GEN);
+        let a = reg.insert(cap(1_000_000), GEN);
         reg.insert(TenantBudget::new("beta", 5_000_000, Month::of(GEN)), GEN);
 
         assert_eq!(reg.len(), 2);
@@ -596,18 +597,18 @@ mod tests {
         assert_eq!(reg.get("beta").map(|b| b.limit()), Some(5_000_000));
         assert!(reg.get("gamma").is_none());
 
-        // risteggiare lo stesso tenant non ne crea un secondo
-        reg.insert(tetto(7_000_000), GEN);
+        // re-inserting the same tenant does not create a second one
+        reg.insert(cap(7_000_000), GEN);
         assert_eq!(reg.len(), 2);
         assert_eq!(reg.get("acme").map(|b| b.limit()), Some(7_000_000));
-        // il tenant precedente è stato sostituito, non affiancato
+        // the previous tenant was replaced, not placed alongside
         assert_ne!(a.limit(), 7_000_000);
     }
 
     #[test]
-    fn le_gli_snapshot_ordinano_per_tenant_e_sono_completi() {
+    fn the_snapshots_are_ordered_by_tenant_and_complete() {
         let reg = BudgetRegistry::new();
-        reg.insert(tetto(1_000_000), GEN);
+        reg.insert(cap(1_000_000), GEN);
         reg.insert(TenantBudget::new("beta", 5_000_000, Month::of(GEN)), GEN);
         let snap = reg.snapshots(GEN);
         assert_eq!(snap.len(), 2);
@@ -616,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn un_registro_vuoto_non_panorama() {
+    fn an_empty_registry_does_not_panic() {
         let reg = BudgetRegistry::new();
         assert_eq!(reg.len(), 0);
         assert!(reg.get("acme").is_none());

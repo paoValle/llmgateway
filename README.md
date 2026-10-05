@@ -1,53 +1,53 @@
 # llmgateway
 
-> Gateway LLM: metering per token, budget per tenant, failover tra provider, metriche Prometheus.
+> LLM gateway: per-token metering, per-tenant budget, failover between providers, Prometheus metrics.
 
-**Stato:** in costruzione. È un side project: nessuna SLA, nessun utente oltre me
-e i miei appunti. Se lo trovi rotto, hai trovato un bug mio, non un requisito mancante.
+**Status:** under construction. It is a side project: no SLA, no users beyond me
+and my notes. If you find it broken, you found a bug of mine, not a missing requirement.
 
-## Il problema
+## The problem
 
-<!-- Due righe. Perché esiste, non come funziona. Se non riesci a scriverlo, il progetto non è chiaro. -->
+<!-- Two lines. Why it exists, not how it works. If you cannot write it, the project is not clear. -->
 
-## Cosa fa
+## What it does
 
-<!-- Le capacità, una per riga. Ogni riga deve essere verificabile da un test o da un comando. -->
+<!-- The capabilities, one per line. Every line must be verifiable by a test or a command. -->
 
-## Cosa NON fa
+## What it does NOT do
 
-<!-- Il perimetro negato. Vale quanto quello affermato, e ti risparmia le bug segnalate. -->
+<!-- The denied perimeter. It weighs as much as the asserted one, and it saves you reported bugs. -->
 
-## Uso
+## Usage
 
 ```bash
-make setup   # dipendenze
-make dev     # in locale
-make ci      # lint + typecheck + test: la stessa cosa che gira in CI
+make setup   # dependencies
+make dev     # locally
+make ci      # lint + typecheck + test: the same thing that runs in CI
 ```
 
-## Architettura
+## Architecture
 
 ```mermaid
 graph TD
-  A[ingresso] --> B[logica]
-  B --> C[(uscita)]
+  A[entry] --> B[logic]
+  B --> C[(exit)]
 ```
 
-<!-- Un diagramma solo quando aiuta. Se la repo è piccola, questo blocco si cancella. -->
+<!-- A diagram only when it helps. If the repo is small, this block is deleted. -->
 
-## Decisioni
+## Decisions
 
-Quelle non ovvie stanno in [`docs/adr/`](docs/adr/): contesto, alternative scartate, conseguenze.
+The non-obvious ones live in [`docs/adr/`](docs/adr/): context, rejected alternatives, consequences.
 
-## Stato del lavoro
+## Work status
 
-- [ ] issue del problema scritta
-- [ ] test che definiscono il contratto
-- [ ] CI verde
-- [ ] README definitivo
-- [ ] tag di release
+- [ ] problem issue written
+- [ ] tests that define the contract
+- [ ] green CI
+- [ ] final README
+- [ ] release tag
 
-## Sviluppo
+## Development
 
 ```bash
 git clone git@github.com:paoValle/llmgateway.git
@@ -55,6 +55,6 @@ cd llmgateway
 make setup && make ci
 ```
 
-## Cosa farei diversamente
+## What I would do differently
 
-<!-- L'onestà tecnica è il segnale di seniority più forte che ci sia. -->
+<!-- Technical honesty is the strongest seniority signal there is. -->
