@@ -18,9 +18,11 @@
 //! - **operating metrics are sampled** 1 in N. Counting them all costs a lock on every
 //!   request, and the global counter becomes a bottleneck.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+
+use tracing::warn;
 
 use crate::pricing::{MicroUsd, Price, PriceTable, Usage};
 use crate::request::RequestShape;
@@ -81,6 +83,10 @@ pub struct Meter {
     seen: AtomicU64,
     /// Bills computed on a model outside the price list: they must be checked by hand.
     estimated: AtomicU64,
+    /// Models already named in the "priced by fallback" warning. One set per meter, and
+    /// the gateway builds one meter per process: the first request on a model outside
+    /// the price list is where somebody can act, the thousandth is noise.
+    reported_estimated: Mutex<BTreeSet<String>>,
     /// Served without the cap, across all tenants.
     uncovered_total: AtomicU64,
 }
@@ -97,6 +103,7 @@ impl Meter {
             errors: AtomicU64::new(0),
             seen: AtomicU64::new(0),
             estimated: AtomicU64::new(0),
+            reported_estimated: Mutex::new(BTreeSet::new()),
             uncovered_total: AtomicU64::new(0),
         }
     }
@@ -108,6 +115,19 @@ impl Meter {
     #[must_use]
     pub fn price_for(&self, model: &str) -> (Price, bool) {
         (self.prices.resolve(model), !self.prices.knows(model))
+    }
+
+    /// `true` the first time this meter names `model` as priced by fallback.
+    ///
+    /// The counter alone is invisible unless somebody reads the dashboard, and the first
+    /// person to learn that a new model is being served is usually the invoice.
+    fn first_estimated_report(&self, model: &str) -> bool {
+        let Ok(mut reported) = self.reported_estimated.lock() else {
+            // Poisoned: another thread panicked while holding it. Reporting again is
+            // cheaper than staying silent forever.
+            return true;
+        };
+        reported.insert(model.to_owned())
     }
 
     /// Records a served request. **It cannot fail.**
@@ -127,6 +147,20 @@ impl Meter {
             // a model outside the price list is an alarm, not a detail: the cap is
             // computed on the worst price and the bill must be checked
             self.estimated.fetch_add(1, Ordering::Relaxed);
+
+            // The counter reaches whoever watches the dashboard, and only if they know
+            // to look. The log line names the model and the price being used, once: the
+            // first time is actionable, the thousandth is noise.
+            if let Some(model) = shape.model.as_deref() {
+                if self.first_estimated_report(model) {
+                    warn!(
+                        model,
+                        input_micro_usd_per_million = price.input,
+                        output_micro_usd_per_million = price.output,
+                        "model outside the price list: priced at the worst known price"
+                    );
+                }
+            }
         }
 
         let cost = price.cost(usage.input_tokens, usage.output_tokens);
@@ -349,6 +383,53 @@ mod tests {
 
     fn meter() -> Meter {
         Meter::new(prices(), 1)
+    }
+
+    #[test]
+    fn an_unknown_model_is_named_once_and_counted_every_time() {
+        let m = meter();
+
+        for _ in 0..3 {
+            m.record(
+                "acme",
+                &shape("brand-new-model"),
+                Usage {
+                    input_tokens: 1_000,
+                    output_tokens: 0,
+                },
+                &Outcome::Served {
+                    provider: "a".to_owned(),
+                    price_estimated: true,
+                },
+            );
+        }
+
+        // the counter keeps counting: the bill of every request stays pessimistic
+        assert_eq!(m.estimated(), 3);
+        // the report happened on the first request and never again for that model
+        assert!(!m.first_estimated_report("brand-new-model"));
+        // a second unknown model is worth its own line
+        assert!(m.first_estimated_report("another-new-model"));
+    }
+
+    #[test]
+    fn a_known_model_is_never_reported() {
+        let m = meter();
+
+        m.record(
+            "acme",
+            &shape("cheap"),
+            Usage {
+                input_tokens: 1_000,
+                output_tokens: 0,
+            },
+            &Outcome::Served {
+                provider: "a".to_owned(),
+                price_estimated: false,
+            },
+        );
+
+        assert_eq!(m.estimated(), 0);
     }
 
     #[test]
