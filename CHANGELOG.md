@@ -5,6 +5,13 @@ versioning [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- A model priced by fallback is named in a `warn` line the first time it is served, with the
+  price being used. The `llmgateway_estimated` counter is exact but silent: it only reaches
+  whoever reads the dashboard, and the first person to learn that a new model is in production
+  was usually the invoice.
+
 ## [0.2.0] - 2026-10-05
 
 The library becomes something you can run: the two transport adapters and a binary.
