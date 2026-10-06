@@ -5,6 +5,10 @@ versioning [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-05
+
+The library becomes something you can run: the two transport adapters and a binary.
+
 ### Added
 - `http` module: the HTTP surface (axum) — `POST /v1/chat/completions` with byte-for-byte
   forwarding, `/metrics`, streaming pass-through, no body-size limit, and
