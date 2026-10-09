@@ -17,7 +17,7 @@ use llmgateway::meter::Meter;
 use llmgateway::pricing::{micros, usd, Price, PriceTable};
 use llmgateway::router::Router;
 
-use support::{shared, Behavior, Fake};
+use support::{responds, shared, Behavior, Fake};
 
 const GEN: i64 = 1_767_225_600_000; // 2026-01-01
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -69,11 +69,7 @@ fn gateway(
 
 /// The 200 response the fake provider gives by default, with usage.
 fn response_with_usage() -> Behavior {
-    Behavior::Responds(
-        200,
-        r#"{"choices":[{"message":{"content":"hello"}}],"usage":{"prompt_tokens":1000,"completion_tokens":500}}"#
-            .to_owned(),
-    )
+    Behavior::Responds { status: 200, body: r#"{"choices":[{"message":{"content":"hello"}}],"usage":{"prompt_tokens":1000,"completion_tokens":500}}"#.to_owned() }
 }
 
 fn request() -> GatewayRequest {
@@ -276,10 +272,10 @@ async fn a_provider_that_falls_over_produces_502_and_the_client_gets_a_generic_m
 #[tokio::test]
 async fn a_400_from_the_provider_goes_back_to_the_client_as_it_is_with_its_body() {
     let (gw, _, _) = gateway(
-        shared(Fake::new("a").with_behaviors(vec![Behavior::Responds(
-            400,
-            r#"{"error":{"message":"unknown model"}}"#.to_owned(),
-        )])),
+        shared(Fake::new("a").with_behaviors(vec![Behavior::Responds {
+            status: 400,
+            body: r#"{"error":{"message":"unknown model"}}"#.to_owned(),
+        }])),
         10.0,
         &["gpt-4o-mini"],
     );
@@ -340,7 +336,7 @@ async fn a_response_without_usage_accounts_for_zero_and_says_so() {
     // the gateway does not estimate after the fact: an invented number is worse than a
     // zero
     let (gw, meter, _) = gateway(
-        shared(Fake::new("a").with_behaviors(vec![Behavior::ok("{\"ok\":true}")])),
+        shared(Fake::new("a").with_behaviors(vec![responds("{\"ok\":true}")])),
         10.0,
         &["gpt-4o-mini"],
     );

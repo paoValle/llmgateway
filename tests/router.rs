@@ -10,7 +10,7 @@ use std::time::Duration;
 use llmgateway::router::{RouteError, Router, DEFAULT_MAX_ATTEMPTS};
 use llmgateway::upstream::{ResponseBody, TransportKind, UpstreamRequest};
 
-use support::{shared, Behavior, Fake};
+use support::{responds, shared, Behavior, Fake};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -27,8 +27,8 @@ fn router(
 
 #[tokio::test]
 async fn the_first_provider_that_answers_wins_and_the_others_are_not_started() {
-    let a = shared(Fake::new("a").with_behaviors(vec![Behavior::ok("{\"from\":\"a\"}")]));
-    let b = shared(Fake::new("b").with_behaviors(vec![Behavior::ok("{\"from\":\"b\"}")]));
+    let a = shared(Fake::new("a").with_behaviors(vec![responds("{\"from\":\"a\"}")]));
+    let b = shared(Fake::new("b").with_behaviors(vec![responds("{\"from\":\"b\"}")]));
     let r = router(vec![a, b], 4)
         .route(request("gpt-4o-mini"))
         .await
@@ -49,7 +49,7 @@ async fn the_first_provider_that_answers_wins_and_the_others_are_not_started() {
 #[tokio::test]
 async fn a_503_moves_to_the_next_provider_and_the_client_does_not_notice() {
     let a = shared(Fake::new("a").with_behaviors(vec![Behavior::unavailable()]));
-    let b = shared(Fake::new("b").with_behaviors(vec![Behavior::ok("{\"ok\":true}")]));
+    let b = shared(Fake::new("b").with_behaviors(vec![responds("{\"ok\":true}")]));
 
     let r = router(vec![a, b], 4)
         .route(request("m"))
@@ -62,10 +62,11 @@ async fn a_503_moves_to_the_next_provider_and_the_client_does_not_notice() {
 
 #[tokio::test]
 async fn a_429_moves_to_the_next_provider_even_though_it_is_a_4xx() {
-    let a = shared(
-        Fake::new("a").with_behaviors(vec![Behavior::Responds(429, "{\"e\":\"rate\"}".into())]),
-    );
-    let b = shared(Fake::new("b").with_behaviors(vec![Behavior::ok("{\"ok\":true}")]));
+    let a = shared(Fake::new("a").with_behaviors(vec![Behavior::Responds {
+        status: 429,
+        body: "{\"e\":\"rate\"}".to_owned(),
+    }]));
+    let b = shared(Fake::new("b").with_behaviors(vec![responds("{\"ok\":true}")]));
 
     let r = router(vec![a, b], 4)
         .route(request("m"))
@@ -76,8 +77,8 @@ async fn a_429_moves_to_the_next_provider_even_though_it_is_a_4xx() {
 
 #[tokio::test]
 async fn a_refused_connection_moves_on_to_the_next_one() {
-    let a = shared(Fake::new("a").with_behaviors(vec![Behavior::NotSent(TransportKind::Connect)]));
-    let b = shared(Fake::new("b").with_behaviors(vec![Behavior::ok("{\"ok\":true}")]));
+    let a = shared(Fake::new("a").with_behaviors(vec![Behavior::NotSent]));
+    let b = shared(Fake::new("b").with_behaviors(vec![responds("{\"ok\":true}")]));
 
     let r = router(vec![a, b], 4)
         .route(request("m"))
@@ -90,11 +91,11 @@ async fn a_refused_connection_moves_on_to_the_next_one() {
 
 #[tokio::test]
 async fn a_400_is_not_retried_on_any_provider() {
-    let a = shared(Fake::new("a").with_behaviors(vec![Behavior::Responds(
-        400,
-        "{\"error\":\"bad request\"}".into(),
-    )]));
-    let b = shared(Fake::new("b").with_behaviors(vec![Behavior::ok("{\"ok\":true}")]));
+    let a = shared(Fake::new("a").with_behaviors(vec![Behavior::Responds {
+        status: 400,
+        body: "{\"error\":\"bad request\"}".to_owned(),
+    }]));
+    let b = shared(Fake::new("b").with_behaviors(vec![responds("{\"ok\":true}")]));
     let error = router(vec![a, b], 4)
         .route(request("m"))
         .await
@@ -121,10 +122,14 @@ async fn a_400_is_not_retried_on_any_provider() {
 async fn a_400_on_all_providers_produces_a_response_and_not_an_exhaustion() {
     // the client got it wrong: telling them "we tried three providers" does not help,
     // and spending three attempts on an error of theirs is wasted time
-    let a =
-        shared(Fake::new("a").with_behaviors(vec![Behavior::Responds(400, "{\"e\":1}".into())]));
-    let b =
-        shared(Fake::new("b").with_behaviors(vec![Behavior::Responds(400, "{\"e\":2}".into())]));
+    let a = shared(Fake::new("a").with_behaviors(vec![Behavior::Responds {
+        status: 400,
+        body: "{\"e\":1}".to_owned(),
+    }]));
+    let b = shared(Fake::new("b").with_behaviors(vec![Behavior::Responds {
+        status: 400,
+        body: "{\"e\":2}".to_owned(),
+    }]));
 
     let error = router(vec![a, b], 4)
         .route(request("m"))
@@ -140,8 +145,11 @@ async fn an_unclassified_status_stops_failover() {
     // a 301 from a chat completions provider is something the gateway does not know how
     // to interpret. Amplifying it across three providers would be worse than propagating
     // it: the error stays, but with its cause and not as a "provider not responding"
-    let a = shared(Fake::new("a").with_behaviors(vec![Behavior::Responds(301, "moved".into())]));
-    let b = shared(Fake::new("b").with_behaviors(vec![Behavior::ok("{\"ok\":true}")]));
+    let a = shared(Fake::new("a").with_behaviors(vec![Behavior::Responds {
+        status: 301,
+        body: "moved".to_owned(),
+    }]));
+    let b = shared(Fake::new("b").with_behaviors(vec![responds("{\"ok\":true}")]));
 
     let error = router(vec![a, b], 4)
         .route(request("m"))
@@ -165,9 +173,11 @@ async fn a_request_already_sent_is_not_retried_even_if_the_provider_looks_health
     // the provider went away after receiving the request: it may have executed it.
     // Retrying on another provider can execute it twice.
     let a = shared(
-        Fake::new("a").with_behaviors(vec![Behavior::SentWithoutResponse(TransportKind::Reset)]),
+        Fake::new("a")
+            .failing_as(TransportKind::Reset)
+            .with_behaviors(vec![Behavior::SentWithoutResponse]),
     );
-    let b = shared(Fake::new("b").with_behaviors(vec![Behavior::ok("{\"ok\":true}")]));
+    let b = shared(Fake::new("b").with_behaviors(vec![responds("{\"ok\":true}")]));
 
     let error = router(vec![a, b], 4)
         .route(request("m"))
@@ -177,6 +187,8 @@ async fn a_request_already_sent_is_not_retried_even_if_the_provider_looks_health
     match error {
         RouteError::DeliveryUnknown { provider, error } => {
             assert_eq!(provider, "a");
+            // the adapter is what names the kind; what this pins is that the router does not
+            // rewrite it, and does not retry
             assert_eq!(error.kind, TransportKind::Reset);
             assert!(!error.delivery.safe_to_retry());
         }
@@ -191,7 +203,7 @@ async fn the_attempt_cap_across_all_providers_stops_failover() {
     let a = shared(Fake::new("a").with_behaviors(vec![Behavior::unavailable()]));
     let b = shared(Fake::new("b").with_behaviors(vec![Behavior::unavailable()]));
     let c = shared(Fake::new("c").with_behaviors(vec![Behavior::unavailable()]));
-    let d = shared(Fake::new("d").with_behaviors(vec![Behavior::ok("{\"ok\":true}")]));
+    let d = shared(Fake::new("d").with_behaviors(vec![responds("{\"ok\":true}")]));
 
     // with a cap of 2, the fourth provider must never be called
     let error = router(vec![a, b, c, d], 2)
@@ -208,7 +220,7 @@ async fn the_attempt_cap_across_all_providers_stops_failover() {
 #[tokio::test]
 async fn a_cap_of_zero_does_not_mean_no_attempts() {
     // zero attempts would be a gateway that serves nobody: the default is 4
-    let a = shared(Fake::new("a").with_behaviors(vec![Behavior::ok("{\"ok\":true}")]));
+    let a = shared(Fake::new("a").with_behaviors(vec![responds("{\"ok\":true}")]));
     let r = router(vec![a], 0);
     assert_eq!(r.max_attempts(), DEFAULT_MAX_ATTEMPTS);
     assert!(r.route(request("m")).await.is_ok());
@@ -272,10 +284,10 @@ async fn without_providers_the_router_says_so_and_tries_nothing() {
 
 #[tokio::test]
 async fn streaming_arrives_in_chunks_and_not_as_a_single_body() {
-    let a = shared(Fake::new("a").with_behaviors(vec![Behavior::Responds(
-        200,
-        "{\"chunk\":1}\n{\"chunk\":2}\n{\"chunk\":3}".to_owned(),
-    )]));
+    let a = shared(Fake::new("a").with_behaviors(vec![Behavior::Responds {
+        status: 200,
+        body: "{\"chunk\":1}\n{\"chunk\":2}\n{\"chunk\":3}".to_owned(),
+    }]));
 
     let r = router(vec![a], 4)
         .route(UpstreamRequest::new(b"{}".to_vec(), "m", true))
@@ -294,7 +306,7 @@ async fn streaming_arrives_in_chunks_and_not_as_a_single_body() {
 async fn providers_are_tried_in_the_order_they_are_given() {
     let a = shared(Fake::new("a").with_behaviors(vec![Behavior::unavailable()]));
     let b = shared(Fake::new("b").with_behaviors(vec![Behavior::unavailable()]));
-    let c = shared(Fake::new("c").with_behaviors(vec![Behavior::ok("{\"ok\":true}")]));
+    let c = shared(Fake::new("c").with_behaviors(vec![responds("{\"ok\":true}")]));
 
     let r = router(vec![a, b, c], 5)
         .route(request("m"))
@@ -307,7 +319,7 @@ async fn providers_are_tried_in_the_order_they_are_given() {
 #[tokio::test]
 async fn the_call_count_tells_where_the_attempts_went() {
     let a = std::sync::Arc::new(Fake::new("a").with_behaviors(vec![Behavior::unavailable()]));
-    let b = std::sync::Arc::new(Fake::new("b").with_behaviors(vec![Behavior::ok("{\"ok\":true}")]));
+    let b = std::sync::Arc::new(Fake::new("b").with_behaviors(vec![responds("{\"ok\":true}")]));
     let r = router(vec![a.clone(), b.clone()], 4);
 
     let response = r.route(request("m")).await.expect("served by b");
@@ -335,9 +347,11 @@ async fn a_skipped_provider_is_not_counted_as_called() {
 async fn a_4xx_the_gateway_does_not_interpret_stops_failover_like_any_other_4xx() {
     // 451 is a 4xx: it is not an "unknown status", it is the client's like a 400.
     // The router stops in both cases, which is the point
-    let a =
-        shared(Fake::new("a").with_behaviors(vec![Behavior::Responds(451, "{\"e\":1}".into())]));
-    let b = shared(Fake::new("b").with_behaviors(vec![Behavior::ok("{\"ok\":true}")]));
+    let a = shared(Fake::new("a").with_behaviors(vec![Behavior::Responds {
+        status: 451,
+        body: "{\"e\":1}".to_owned(),
+    }]));
+    let b = shared(Fake::new("b").with_behaviors(vec![responds("{\"ok\":true}")]));
 
     let error = router(vec![a, b], 4)
         .route(request("m"))

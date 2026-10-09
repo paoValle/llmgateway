@@ -37,6 +37,12 @@ A minimal set of dependencies, all from the "official" Rust ecosystem:
 | `thiserror` | typed errors, one per line, without macros expanding in debug |
 | `tracing` + `tracing-subscriber` | structured logging to sinks; a `println!` is not a log |
 
+One more direct crate, test-only and outside the table: `test-provider` is ours, is compiled only
+for the tests, and deliberately does not depend on `llmgateway` — a fake provider that owned this
+crate's `Upstream` would have to be released in lockstep with it. `tests/support` keeps only the
+adapter onto `Upstream`; the behaviours, the counters and the bodies are shared with the other
+projects that measure this one.
+
 Nothing else. In particular:
 
 - **no `serde_yaml`**: TOML takes the format question off the table and is better suited to

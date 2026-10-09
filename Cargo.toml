@@ -30,6 +30,11 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# The fake provider used by `tests/support`: the script, the counters and the JSON bodies
+# are shared with the projects that measure this gateway, so a behaviour added for one of
+# them is not invisible in the others. `tests/support` keeps only the adapter onto
+# `Upstream`, which is this crate's own vocabulary.
+test-provider = { git = "https://github.com/paoValle/test-provider" }
 
 [lints.rust]
 unsafe_code = "forbid"
