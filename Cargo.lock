@@ -1178,8 +1178,8 @@ dependencies = [
 
 [[package]]
 name = "test-provider"
-version = "0.1.0"
-source = "git+https://github.com/paoValle/test-provider#e1c7b3ca27fe24b1f90e866eaf5d581d417f3c6e"
+version = "0.1.1"
+source = "git+https://github.com/paoValle/test-provider?rev=d05ff9ed22792c20f793c5954bfe98f0c66fea69#d05ff9ed22792c20f793c5954bfe98f0c66fea69"
 dependencies = [
  "serde_json",
 ]

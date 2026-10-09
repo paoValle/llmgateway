@@ -33,8 +33,10 @@ http-body-util = "0.1"
 # The fake provider used by `tests/support`: the script, the counters and the JSON bodies
 # are shared with the projects that measure this gateway, so a behaviour added for one of
 # them is not invisible in the others. `tests/support` keeps only the adapter onto
-# `Upstream`, which is this crate's own vocabulary.
-test-provider = { git = "https://github.com/paoValle/test-provider" }
+# `Upstream`, which is this crate's own vocabulary. The `rev` is deliberate and is the
+# released `v0.1.1`: a floating git dependency makes `cargo update --locked` fail every
+# time that branch moves, and the locked revision is meant to be the one that was measured.
+test-provider = { git = "https://github.com/paoValle/test-provider", rev = "d05ff9ed22792c20f793c5954bfe98f0c66fea69" }
 
 [lints.rust]
 unsafe_code = "forbid"
