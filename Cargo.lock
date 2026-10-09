@@ -642,6 +642,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "test-provider",
  "thiserror",
  "tokio",
  "toml",
@@ -1173,6 +1174,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "test-provider"
+version = "0.1.0"
+source = "git+https://github.com/paoValle/test-provider#e1c7b3ca27fe24b1f90e866eaf5d581d417f3c6e"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
