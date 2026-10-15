@@ -37,11 +37,15 @@ jobs:
       - run: cargo test --all-targets
       - run: cargo test --doc
 
-  # the lockfile is what makes the build reproducible: if dependencies resolve
-  # differently from one commit to the next, a green CI says nothing
+  # the lockfile is what makes the build reproducible: the lock is complete and
+  # consistent with the manifests, and `--locked` proves it by refusing to write.
+  # What is deliberately *not* asserted: that the registry has published nothing
+  # newer. That was `cargo update --locked`, and it went red every time a dependency
+  # published a compatible version while the build and the tests were unaffected --
+  # a chore, not a signal. "Something published" is what .github/dependabot.yml is for.
   lockfile:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo update --locked
+      - run: cargo metadata --locked --format-version 1 > /dev/null
