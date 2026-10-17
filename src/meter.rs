@@ -43,6 +43,44 @@ struct TenantTotals {
     /// It is the most important alarm of the gateway: from that moment the cap no longer
     /// protects anyone, and as long as the number is zero the service is under control.
     uncovered: AtomicU64,
+    /// Money spent per model, **exact**. The tenant total says how much; this says on what.
+    ///
+    /// A per-tenant map, not a global one: the lock is taken on a tenant the request already
+    /// owns, and the models one tenant uses are few. The key is never free-form client input —
+    /// a model the price list does not know collapses into [`UNLISTED_MODEL`] — because a
+    /// Prometheus series is permanent and a tenant that could name a new one per request could
+    /// mint an unbounded metric.
+    by_model: RwLock<BTreeMap<String, Arc<AtomicU64>>>,
+}
+
+/// The label a model the price list does not know is counted under.
+///
+/// The model in a request body is free-form, so it may not become a label: a series is
+/// permanent. Models outside the price list are what the `estimated` counter already points at,
+/// and they are one row here.
+pub const UNLISTED_MODEL: &str = "unlisted";
+
+impl TenantTotals {
+    /// The spend counter of one model of this tenant, created the first time it is seen.
+    ///
+    /// `None` when the lock is poisoned: the caller counts the degradation, exactly as it does
+    /// for the tenant map, so the module's contract — degradation is visible in `Meter::errors`
+    /// — holds here too.
+    fn for_model(&self, model: &str) -> Option<Arc<AtomicU64>> {
+        if let Ok(map) = self.by_model.read() {
+            if let Some(counter) = map.get(model) {
+                return Some(Arc::clone(counter));
+            }
+        }
+        let fresh = Arc::new(AtomicU64::new(0));
+        if let Ok(mut map) = self.by_model.write() {
+            return Some(Arc::clone(
+                map.entry(model.to_owned())
+                    .or_insert_with(|| Arc::clone(&fresh)),
+            ));
+        }
+        None
+    }
 }
 
 /// How a request ended, from the accounting point of view.
@@ -166,14 +204,28 @@ impl Meter {
         let cost = price.cost(usage.input_tokens, usage.output_tokens);
 
         // money is exact, and it is not sampled: it is the number the gateway exists for
-        self.totals_for(tenant)
-            .spent
-            .fetch_add(cost, Ordering::Relaxed);
+        let counters = self.totals_for(tenant);
+        counters.spent.fetch_add(cost, Ordering::Relaxed);
+        // and it is attributed to the model that produced it, but only money: a zero-cost row is
+        // a permanent series that says nothing. The label is never the body's string — the price
+        // list is the bounded set — so a model it does not know is one `unlisted` row.
+        if let Some(model) = shape.model.as_deref() {
+            if cost > 0 {
+                let label = if estimated { UNLISTED_MODEL } else { model };
+                match counters.for_model(label) {
+                    Some(counter) => {
+                        counter.fetch_add(cost, Ordering::Relaxed);
+                    }
+                    None => {
+                        self.errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
 
         if !self.should_sample() {
             return;
         }
-        let counters = self.totals_for(tenant);
         match outcome {
             Outcome::Served { .. } => {
                 counters.served.fetch_add(1, Ordering::Relaxed);
@@ -319,6 +371,14 @@ impl Meter {
 }
 
 fn snapshot_of(t: &TenantTotals, tenant_id: &str) -> TenantSnapshot {
+    let by_model = t.by_model.read().map_or_else(
+        |_| BTreeMap::new(),
+        |map| {
+            map.iter()
+                .map(|(model, spent)| (model.clone(), spent.load(Ordering::Relaxed)))
+                .collect()
+        },
+    );
     TenantSnapshot {
         tenant_id: tenant_id.to_owned(),
         spent: t.spent.load(Ordering::Relaxed),
@@ -326,6 +386,7 @@ fn snapshot_of(t: &TenantTotals, tenant_id: &str) -> TenantSnapshot {
         budget_denied: t.budget_denied.load(Ordering::Relaxed),
         failed: t.failed.load(Ordering::Relaxed),
         uncovered: t.uncovered.load(Ordering::Relaxed),
+        by_model,
     }
 }
 
@@ -345,6 +406,9 @@ pub struct TenantSnapshot {
     pub failed: u64,
     /// Served without the cap. **Never sampled**: it is an alarm, not a statistic.
     pub uncovered: u64,
+    /// Money spent per model, **exact**, keyed by the model the body asked for. A model outside
+    /// the price list is counted under [`UNLISTED_MODEL`].
+    pub by_model: BTreeMap<String, MicroUsd>,
 }
 
 #[cfg(test)]
@@ -453,6 +517,92 @@ mod tests {
     }
 
     #[test]
+    fn the_money_is_attributed_to_the_model_that_spent_it() {
+        let m = meter();
+        let served = |provider: &str| Outcome::Served {
+            provider: provider.to_owned(),
+            price_estimated: false,
+        };
+        // the same tenant on two models: the total says how much, the map says on what
+        m.record(
+            "acme",
+            &shape("cheap"),
+            Usage {
+                input_tokens: 1_000_000,
+                output_tokens: 0,
+            },
+            &served("a"),
+        );
+        m.record(
+            "acme",
+            &shape("expensive"),
+            Usage {
+                input_tokens: 1_000_000,
+                output_tokens: 0,
+            },
+            &served("a"),
+        );
+
+        let snap = m.snapshot_for("acme").expect("the tenant was seen");
+        assert_eq!(snap.by_model.get("cheap"), Some(&150));
+        assert_eq!(snap.by_model.get("expensive"), Some(&2_500));
+        assert_eq!(
+            snap.spent,
+            snap.by_model.values().sum::<MicroUsd>(),
+            "the per-model rows must add up to the tenant total"
+        );
+    }
+
+    #[test]
+    fn a_model_the_price_list_does_not_know_is_one_row_and_not_a_label() {
+        let m = meter();
+        // the model in a body is free-form: it may not become a Prometheus series, because a
+        // tenant that could name a new one per request could mint an unbounded metric
+        for model in ["brand-new-one", "brand-new-two", "brand-new-three"] {
+            m.record(
+                "acme",
+                &shape(model),
+                Usage {
+                    input_tokens: 1_000_000,
+                    output_tokens: 0,
+                },
+                &Outcome::Served {
+                    provider: "a".to_owned(),
+                    price_estimated: true,
+                },
+            );
+        }
+
+        let snap = m.snapshot_for("acme").expect("the tenant was seen");
+        assert_eq!(
+            snap.by_model.len(),
+            1,
+            "three unknown models are one row: {:?}",
+            snap.by_model
+        );
+        // the worst known price, three times
+        assert_eq!(snap.by_model.get(UNLISTED_MODEL), Some(&7_500));
+        assert_eq!(snap.spent, 7_500);
+    }
+
+    #[test]
+    fn a_request_that_cost_nothing_leaves_no_series_behind() {
+        let m = meter();
+        m.record(
+            "acme",
+            &shape("cheap"),
+            Usage::default(),
+            &Outcome::Failed {
+                provider: "a".to_owned(),
+            },
+        );
+        assert!(
+            m.snapshot_for("acme").expect("seen").by_model.is_empty(),
+            "a zero-cost row is a permanent series that says nothing"
+        );
+    }
+
+    #[test]
     fn the_bills_of_two_tenants_do_not_mix() {
         let m = meter();
         m.record(
@@ -521,6 +671,10 @@ mod tests {
         // but the request was served anyway
         assert_eq!(m.spent("acme"), 0);
         assert_eq!(m.errors(), 1);
+        assert!(
+            m.snapshot_for("acme").expect("seen").by_model.is_empty(),
+            "a body with no model has no model to attribute the cost to"
+        );
     }
 
     #[test]
