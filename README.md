@@ -116,7 +116,7 @@ the whole decision path is tested without a socket.
 
 ## Tests
 
-128 tests, no network, in under a second: 86 unit tests, 19 for the router's failover, 14 for
+132 tests, no network, in under a second: 90 unit tests, 19 for the router's failover, 14 for
 the gateway path, and 9 integration tests that run a real HTTP provider on an ephemeral port —
 byte-for-byte forwarding, unknown key, cap enforced before the provider is called, `503`
 failover, a provider that hangs after receiving (not retried), streaming, `/metrics`.

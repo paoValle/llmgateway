@@ -120,10 +120,17 @@ async fn metrics(State(gateway): State<Arc<Gateway>>) -> Response {
 # TYPE llmgateway_spend_micro_usd gauge
 ",
     );
+    // one family per group, as the exposition format asks: the model rows are collected here and
+    // appended whole, instead of being interleaved with the spend rows
+    let mut models = String::from(
+        "# TYPE llmgateway_model_spend_micro_usd gauge
+",
+    );
     let mut sampled = String::from(
         "# operating counters: sampled, hence the name (ADR 0005)\n\
          # TYPE llmgateway_sampled_requests_total counter\n\
-         # TYPE llmgateway_sampled_budget_denied_total counter\n",
+         # TYPE llmgateway_sampled_budget_denied_total counter\n\
+         # TYPE llmgateway_sampled_failures_total counter\n",
     );
     let mut alarms = String::from(
         "# TYPE llmgateway_served_without_cap_total counter\n\
@@ -150,6 +157,18 @@ async fn metrics(State(gateway): State<Arc<Gateway>>) -> Response {
             tenant.budget_denied
         );
         let _ = writeln!(
+            sampled,
+            "llmgateway_sampled_failures_total{{tenant=\"{id}\"}} {}",
+            tenant.failed
+        );
+        for (model, spent) in &tenant.by_model {
+            let model = escape_label(model);
+            let _ = writeln!(
+                models,
+                "llmgateway_model_spend_micro_usd{{tenant=\"{id}\",model=\"{model}\"}} {spent}"
+            );
+        }
+        let _ = writeln!(
             alarms,
             "llmgateway_served_without_cap_total{{tenant=\"{id}\"}} {}",
             tenant.uncovered
@@ -170,7 +189,7 @@ async fn metrics(State(gateway): State<Arc<Gateway>>) -> Response {
         );
     }
 
-    let body = format!("{out}{sampled}{alarms}");
+    let body = format!("{out}{models}{sampled}{alarms}");
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
@@ -189,7 +208,33 @@ fn status_of(status: u16) -> StatusCode {
     StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY)
 }
 
-/// Prometheus label values cannot contain an unescaped quote or backslash.
+/// Prometheus label values cannot contain an unescaped quote, backslash or newline.
+///
+/// The model in a body is client input, so all of them are escaped: a newline left in place
+/// would end the sample line, and the rest of the label could forge another one.
 fn escape_label(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_label;
+
+    #[test]
+    fn a_label_from_a_body_cannot_end_the_line_it_is_in() {
+        assert_eq!(escape_label("gpt-4o-mini"), "gpt-4o-mini");
+        assert_eq!(escape_label("a\"b"), "a\\\"b");
+        assert_eq!(escape_label("a\\b"), "a\\\\b");
+        assert_eq!(escape_label("a\nb"), "a\\nb");
+        assert_eq!(escape_label("a\rb"), "a\\rb");
+        // the shape that would forge a whole sample line
+        assert_eq!(
+            escape_label("x\nllmgateway_spend_micro_usd{tenant=\"acme\"} 999"),
+            "x\\nllmgateway_spend_micro_usd{tenant=\\\"acme\\\"} 999"
+        );
+    }
 }

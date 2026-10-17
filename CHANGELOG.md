@@ -7,6 +7,15 @@ versioning [SemVer](https://semver.org/).
 
 ### Added
 
+- `/metrics` exposes the two numbers the RFC's success contract asks for and the meter already
+  kept: the failures per tenant (`llmgateway_sampled_failures_total`, sampled like the other
+  operating counters) and the exact cost per model
+  (`llmgateway_model_spend_micro_usd{tenant,model}`). The tenant total says how much; the model
+  row says on what. A model the price list does not know is counted under `model="unlisted"`
+  rather than by its own name: the model in a body is free-form, and a Prometheus series is
+  permanent, so a tenant must not be able to mint one per request. A request that cost nothing
+  leaves no row at all.
+
 - A model priced by fallback is named in a `warn` line the first time it is served, with the
   price being used. The `llmgateway_estimated` counter is exact but silent: it only reaches
   whoever reads the dashboard, and the first person to learn that a new model is in production

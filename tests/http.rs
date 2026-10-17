@@ -354,6 +354,14 @@ async fn metrics_expose_exact_money_and_sampled_counters_by_name() {
         "{text}"
     );
     assert!(
+        text.contains(r#"llmgateway_sampled_failures_total{tenant="acme"} 0"#),
+        "a served request is not a failure, and the counter must exist to say so: {text}"
+    );
+    assert!(
+        text.contains(r#"llmgateway_model_spend_micro_usd{tenant="acme",model="gpt-4o-mini"} 1"#),
+        "the cost is attributed to the model the body asked for: {text}"
+    );
+    assert!(
         text.contains(r#"llmgateway_served_without_cap_total{tenant="acme"} 0"#),
         "{text}"
     );
